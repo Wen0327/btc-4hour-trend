@@ -55,7 +55,8 @@ load_dotenv()
 # ============================================================
 BINANCE_FAPI = "https://fapi.binance.com"
 FNG_URL = "https://api.alternative.me/fng/"
-SYMBOL = "BTCUSDT"
+SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+SYMBOL_DISPLAY = {"BTCUSDT": "BTC", "ETHUSDT": "ETH"}
 HEADERS = {"User-Agent": "Mozilla/5.0 (btc-4h-signal/1.0)"}
 
 # Scoring thresholds (tune after paper trading)
@@ -80,10 +81,10 @@ def get(url: str, params: Optional[dict] = None, retries: int = 3, timeout: int 
 # ============================================================
 # Data fetchers
 # ============================================================
-def fetch_klines_4h(limit: int = 60) -> List[Dict[str, Any]]:
+def fetch_klines_4h(symbol: str, limit: int = 60) -> List[Dict[str, Any]]:
     """Last `limit` 4h candles. Last item may be in-progress."""
     data = get(f"{BINANCE_FAPI}/fapi/v1/klines",
-               {"symbol": SYMBOL, "interval": "4h", "limit": limit})
+               {"symbol": symbol, "interval": "4h", "limit": limit})
     return [{
         "time":   datetime.fromtimestamp(k[0]/1000, tz=timezone.utc),
         "open":   float(k[1]),
@@ -93,31 +94,31 @@ def fetch_klines_4h(limit: int = 60) -> List[Dict[str, Any]]:
         "volume": float(k[5]),
     } for k in data]
 
-def fetch_funding_rate() -> List[Tuple[datetime, float]]:
+def fetch_funding_rate(symbol: str) -> List[Tuple[datetime, float]]:
     data = get(f"{BINANCE_FAPI}/fapi/v1/fundingRate",
-               {"symbol": SYMBOL, "limit": 10})
+               {"symbol": symbol, "limit": 10})
     return [(datetime.fromtimestamp(d["fundingTime"]/1000, tz=timezone.utc),
              float(d["fundingRate"])) for d in data]
 
-def fetch_open_interest_hist() -> List[Tuple[datetime, float, float]]:
-    """Returns [(time, sumOI_btc, sumOI_usd), ...]"""
+def fetch_open_interest_hist(symbol: str) -> List[Tuple[datetime, float, float]]:
+    """Returns [(time, sumOI, sumOI_value), ...]"""
     data = get(f"{BINANCE_FAPI}/futures/data/openInterestHist",
-               {"symbol": SYMBOL, "period": "4h", "limit": 10})
+               {"symbol": symbol, "period": "4h", "limit": 10})
     return [(datetime.fromtimestamp(d["timestamp"]/1000, tz=timezone.utc),
              float(d["sumOpenInterest"]),
              float(d["sumOpenInterestValue"])) for d in data]
 
-def fetch_long_short_ratio() -> List[Tuple[datetime, float]]:
+def fetch_long_short_ratio(symbol: str) -> List[Tuple[datetime, float]]:
     """Retail (global) account-based long/short ratio."""
     data = get(f"{BINANCE_FAPI}/futures/data/globalLongShortAccountRatio",
-               {"symbol": SYMBOL, "period": "4h", "limit": 5})
+               {"symbol": symbol, "period": "4h", "limit": 5})
     return [(datetime.fromtimestamp(d["timestamp"]/1000, tz=timezone.utc),
              float(d["longShortRatio"])) for d in data]
 
-def fetch_top_trader_ratio() -> List[Tuple[datetime, float]]:
+def fetch_top_trader_ratio(symbol: str) -> List[Tuple[datetime, float]]:
     """Top trader (by position size) long/short."""
     data = get(f"{BINANCE_FAPI}/futures/data/topLongShortPositionRatio",
-               {"symbol": SYMBOL, "period": "4h", "limit": 5})
+               {"symbol": symbol, "period": "4h", "limit": 5})
     return [(datetime.fromtimestamp(d["timestamp"]/1000, tz=timezone.utc),
              float(d["longShortRatio"])) for d in data]
 
@@ -267,10 +268,11 @@ COMPONENTS = [
 DECISION_LABEL = {"LONG": "做多", "SHORT": "做空", "WAIT": "觀望"}
 DECISION_EMOJI = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "🟡"}
 
-def print_friendly(decision, confidence, price, chg_24h, ts, scored):
+def print_friendly(symbol, decision, confidence, price, chg_24h, ts, scored):
+    name = SYMBOL_DISPLAY.get(symbol, symbol)
     bar = "═" * 40
     print(f"\n  {bar}")
-    print(f"  BTC 4H Signal — {ts.strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"  {name} 4H Signal — {ts.strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"  {bar}\n")
     print(f"  💰 ${price:,.2f}   24h: {chg_24h:+.2f}%\n")
 
@@ -320,16 +322,17 @@ def print_friendly(decision, confidence, price, chg_24h, ts, scored):
     print(f"  {bar}")
 
 
-def run_once(output_json: bool = False):
+def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
+    name = SYMBOL_DISPLAY.get(symbol, symbol)
     ts = datetime.now(timezone.utc)
     if not output_json:
-        print("Fetching...", flush=True)
+        print(f"Fetching {name}...", flush=True)
 
-    klines  = fetch_klines_4h(60)
-    rates   = fetch_funding_rate()
-    oi_hist = fetch_open_interest_hist()
-    ls_hist = fetch_long_short_ratio()
-    tt_hist = fetch_top_trader_ratio()
+    klines  = fetch_klines_4h(symbol, 60)
+    rates   = fetch_funding_rate(symbol)
+    oi_hist = fetch_open_interest_hist(symbol)
+    ls_hist = fetch_long_short_ratio(symbol)
+    tt_hist = fetch_top_trader_ratio(symbol)
     fng     = fetch_fear_greed()
 
     price = klines[-1]["close"]
@@ -362,9 +365,10 @@ def run_once(output_json: bool = False):
         decision = "LONG" if confidence > THRESH_LONG else ("SHORT" if confidence < THRESH_SHORT else "WAIT")
 
     if not output_json:
-        print_friendly(decision, confidence, price, chg_24h, ts, scored)
+        print_friendly(symbol, decision, confidence, price, chg_24h, ts, scored)
 
     result = {
+        "symbol": symbol,
         "timestamp": ts.isoformat(),
         "price": price,
         "chg_24h_pct": chg_24h,
@@ -383,26 +387,30 @@ def send_discord(webhook: str, result: dict):
     emoji = DECISION_EMOJI.get(d, "⚪")
     label = DECISION_LABEL.get(d, d)
     conf = result["confidence"]
-    lines = [
-        f"{emoji} **BTC 4H — {d}（{label}）**",
+    name = SYMBOL_DISPLAY.get(result.get("symbol", ""), "")
+    header = [
+        f"{emoji} **{name} 4H — {d}（{label}）**",
         f"💰 ${result['price']:,.0f}　24h: {result['chg_24h_pct']:+.2f}%",
     ]
     if d == "WAIT" and abs(conf) > 0.05:
         lean = "LONG" if conf > 0 else "SHORT"
-        lines.append(f"📈 方向偏向：{lean}（{DECISION_LABEL[lean]}）{conf*100:+.1f}%")
+        header.append(f"📈 方向偏向：{lean}（{DECISION_LABEL[lean]}）{conf*100:+.1f}%")
     elif d != "WAIT":
-        lines.append(f"📊 信心度：{conf*100:+.1f}%")
-    lines.append("")
+        header.append(f"📊 信心度：{conf*100:+.1f}%")
+
+    detail = []
     bullish = [c for c in result["components"] if c["score"] > 0]
     bearish = [c for c in result["components"] if c["score"] < 0]
     if bullish:
-        lines.append("✅ 偏多")
+        detail.append("✅ 偏多")
         for c in bullish:
-            lines.append(f"　• {c['reason']}")
+            detail.append(f"  • {c['reason']}")
     if bearish:
-        lines.append("❌ 偏空")
+        detail.append("❌ 偏空")
         for c in bearish:
-            lines.append(f"　• {c['reason']}")
+            detail.append(f"  • {c['reason']}")
+
+    lines = header + ["```"] + detail + ["```"]
     try:
         requests.post(webhook, json={"content": "\n".join(lines)}, timeout=10)
     except Exception as e:
@@ -413,8 +421,8 @@ def append_csv(path: str, result: dict):
     with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new_file:
-            w.writerow(["timestamp", "price", "chg_24h_pct", "decision", "confidence", "total_score"])
-        w.writerow([result["timestamp"], result["price"], f"{result['chg_24h_pct']:.4f}",
+            w.writerow(["symbol", "timestamp", "price", "chg_24h_pct", "decision", "confidence", "total_score"])
+        w.writerow([result.get("symbol", ""), result["timestamp"], result["price"], f"{result['chg_24h_pct']:.4f}",
                     result["decision"], f"{result['confidence']:.4f}", f"{result['total_score']:.4f}"])
 
 def sleep_to_next_4h():
@@ -437,14 +445,18 @@ def main():
     args = ap.parse_args()
 
     while True:
-        try:
-            result = run_once(output_json=args.json)
-            if args.discord:
-                send_discord(args.discord, result)
-            if args.log:
-                append_csv(args.log, result)
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
+        for i, symbol in enumerate(SYMBOLS):
+            if i > 0 and not args.json:
+                print("\n")
+            try:
+                result = run_once(symbol=symbol, output_json=args.json)
+                if args.discord:
+                    send_discord(args.discord, result)
+                if args.log:
+                    append_csv(args.log, result)
+            except Exception as e:
+                name = SYMBOL_DISPLAY.get(symbol, symbol)
+                print(f"Error ({name}): {e}", file=sys.stderr)
         if not args.loop:
             break
         sleep_to_next_4h()
