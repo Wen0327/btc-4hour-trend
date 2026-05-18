@@ -159,8 +159,8 @@ python3 btc_4h_signal.py
 
 按優先序:
 
-1. **加 FOMC / CPI 日曆 veto** — 公布前後 6h 強制 WAIT。FOMC 日期硬編進腳本,CPI 用第二個週二或硬編
-2. **加 ETF 流量** — SoSoValue 有免費 endpoint(`/api/openapi/etf/...`),拿 BTC 現貨 ETF 日流量,單日流出 > $300M 強制 WAIT
+1. ~~**FOMC / CPI 日曆**~~ ✅ 已加 hint（2026-05-18），前後 6h 顯示警告，不強制 WAIT。日期硬編 2026，年底需更新
+2. ~~**ETF 流量**~~ ❌ 放棄 — 資料收盤後才公布，對未來 4h 預測有滯後性，實測無效（2026-05-18）
 3. **加美股 correlation veto** — 抓 SPY 4h klines(Binance 沒有,要用 yfinance 或 Alpaca),美股盤中跌 > 1.5% 加重 SHORT 權重
 4. **EMA200 雙重確認** — 現有 EMA50 維度在盤整區間會產生噪音。加 EMA200 區分「真轉向」vs「只是回調」：價格 > EMA50 > EMA200 = 強多、價格 < EMA50 < EMA200 = 強空、不一致 = 打折。2026-05-18 測試結果：BTC 弱空（EMA50 > EMA200 但價格 < EMA50）、ETH 強空（價格 < EMA50 < EMA200）
 5. **回測 module** — 用前 4 週累積的 signal 配合歷史 4h 線跑 grid search,優化權重和門檻

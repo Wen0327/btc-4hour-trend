@@ -55,6 +55,7 @@ load_dotenv()
 # ============================================================
 BINANCE_FAPI = "https://fapi.binance.com"
 FNG_URL = "https://api.alternative.me/fng/"
+SOSOVALUE_API = "https://openapi.sosovalue.com/openapi/v1"
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 SYMBOL_DISPLAY = {"BTCUSDT": "BTC", "ETHUSDT": "ETH"}
 HEADERS = {"User-Agent": "Mozilla/5.0 (btc-4h-signal/1.0)"}
@@ -485,13 +486,21 @@ def main():
             except Exception as e:
                 name = SYMBOL_DISPLAY.get(symbol, symbol)
                 print(f"Error ({name}): {e}", file=sys.stderr)
+        # Collect all hints
+        hints = []
         macro_hint = check_macro_event(datetime.now(timezone.utc))
         if macro_hint:
+            hints.append(macro_hint)
+        if hints:
+            hint_block = "\n".join(hints)
             if not args.json:
-                print(f"\n  {macro_hint}\n")
+                print(f"\n  {'─' * 38}")
+                for h in hints:
+                    print(f"  {h}")
+                print()
             if args.discord:
                 try:
-                    requests.post(args.discord, json={"content": macro_hint}, timeout=10)
+                    requests.post(args.discord, json={"content": hint_block}, timeout=10)
                 except Exception:
                     pass
         if not args.loop:
