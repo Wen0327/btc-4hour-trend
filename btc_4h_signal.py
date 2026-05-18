@@ -93,6 +93,28 @@ def check_macro_event(ts: datetime) -> Optional[str]:
             return f"⚠️ {name} 公布{direction} {diff_h:.1f}h — 波動劇烈，技術面指標可能失效"
     return None
 
+def fetch_news_titles(limit=15) -> List[str]:
+    """Fetch BTC news titles from SoSoValue."""
+    api_key = os.environ.get("SOSOVALUE_API_KEY")
+    if not api_key:
+        return []
+    try:
+        r = requests.get(f"{SOSOVALUE_API}/news/featured/currency",
+                         headers={"x-soso-api-key": api_key},
+                         params={"currency": "BTC", "pageNum": 1, "pageSize": limit},
+                         timeout=10)
+        r.raise_for_status()
+        items = r.json().get("data", {}).get("list", [])
+        titles = []
+        for item in items:
+            en = [m for m in item.get("multilanguageContent", []) if m["language"] == "en"]
+            title = en[0].get("title") if en else None
+            if title and len(title.strip()) > 10:
+                titles.append(title.strip())
+        return titles
+    except Exception:
+        return []
+
 # ============================================================
 # HTTP helper with retry
 # ============================================================
@@ -501,6 +523,25 @@ def main():
             if args.discord:
                 try:
                     requests.post(args.discord, json={"content": hint_block}, timeout=10)
+                except Exception:
+                    pass
+        # News headlines
+        news = fetch_news_titles(15)
+        if news:
+            if not args.json:
+                print(f"\n  {'─' * 38}")
+                print(f"  📰 最新 BTC 相關新聞")
+                print(f"  {'─' * 38}")
+                for t in news[:10]:
+                    print(f"  • {t[:80]}")
+                print()
+            if args.discord:
+                lines = ["📰 **BTC 相關新聞**", "```"]
+                for t in news[:10]:
+                    lines.append(f"• {t[:80]}")
+                lines.append("```")
+                try:
+                    requests.post(args.discord, json={"content": "\n".join(lines)}, timeout=10)
                 except Exception:
                     pass
         if not args.loop:
