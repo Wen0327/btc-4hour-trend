@@ -177,6 +177,41 @@ def fetch_fear_greed() -> int:
     data = get(FNG_URL, {"limit": 1})
     return int(data["data"][0]["value"])
 
+def fetch_daily_klines(symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
+    data = get(f"{BINANCE_FAPI}/fapi/v1/klines",
+               {"symbol": symbol, "interval": "1d", "limit": limit})
+    return [{
+        "time":   datetime.fromtimestamp(k[0]/1000, tz=timezone.utc),
+        "open":   float(k[1]),
+        "high":   float(k[2]),
+        "low":    float(k[3]),
+        "close":  float(k[4]),
+        "volume": float(k[5]),
+    } for k in data]
+
+def fetch_etf_flow() -> Optional[Dict]:
+    api_key = os.environ.get("SOSOVALUE_API_KEY")
+    if not api_key:
+        return None
+    try:
+        r = requests.get(f"{SOSOVALUE_API}/etfs/summary-history",
+                         headers={"x-soso-api-key": api_key},
+                         params={"symbol": "BTC", "country_code": "US", "limit": 10},
+                         timeout=10)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+        if not data:
+            return None
+        from collections import defaultdict
+        by_date = defaultdict(list)
+        for d in data:
+            by_date[d["date"]].append(d)
+        latest_date = max(by_date.keys())
+        daily = min(by_date[latest_date], key=lambda x: abs(x["total_value_traded"]))
+        return {"date": latest_date, "flow": daily["total_net_inflow"], "assets": daily["total_net_assets"]}
+    except Exception:
+        return None
+
 # ============================================================
 # Technical helpers
 # ============================================================
@@ -188,6 +223,45 @@ def ema(values: List[float], period: int) -> Optional[float]:
     for v in values[period:]:
         e = v * k + e * (1 - k)
     return e
+
+def calc_rsi(closes: List[float], period: int = 14) -> List[Optional[float]]:
+    if len(closes) < period + 1:
+        return [None] * len(closes)
+    rsis: List[Optional[float]] = [None] * period
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i-1]
+        gains.append(max(d, 0))
+        losses.append(max(-d, 0))
+    ag = sum(gains[:period]) / period
+    al = sum(losses[:period]) / period
+    rsis.append(100 - 100 / (1 + ag / al) if al else 100)
+    for i in range(period, len(gains)):
+        ag = (ag * (period - 1) + gains[i]) / period
+        al = (al * (period - 1) + losses[i]) / period
+        rsis.append(100 - 100 / (1 + ag / al) if al else 100)
+    return rsis
+
+def calc_macd(closes: List[float], fast=12, slow=26, sig=9):
+    if len(closes) < slow + sig:
+        return None, None, None
+    k_f = 2 / (fast + 1)
+    ema_f = [sum(closes[:fast]) / fast]
+    for c in closes[fast:]:
+        ema_f.append(c * k_f + ema_f[-1] * (1 - k_f))
+    k_s = 2 / (slow + 1)
+    ema_s = [sum(closes[:slow]) / slow]
+    for c in closes[slow:]:
+        ema_s.append(c * k_s + ema_s[-1] * (1 - k_s))
+    offset = slow - fast
+    macd_line = [ema_f[i + offset] - ema_s[i] for i in range(len(ema_s))]
+    k_sig = 2 / (sig + 1)
+    sig_line = [sum(macd_line[:sig]) / sig]
+    for m in macd_line[sig:]:
+        sig_line.append(m * k_sig + sig_line[-1] * (1 - k_sig))
+    off2 = sig - 1
+    hist = [macd_line[i + off2] - sig_line[i] for i in range(len(sig_line))]
+    return macd_line, sig_line, hist
 
 def atr(klines: List[dict], period: int = 14) -> Optional[float]:
     if len(klines) < period + 1:
@@ -303,81 +377,76 @@ def check_veto(klines):
     return None
 
 # ============================================================
-# Main
+# Main — Dashboard mode
 # ============================================================
-COMPONENTS = [
-    # (name, weight, fetcher_keys, scorer)
-    ("4h candle",      1.0, "candle"),
+# 行情 components (derivatives)
+MARKET_COMPONENTS = [
     ("Funding rate",   1.5, "funding"),
     ("OI vs price",    1.2, "oi_price"),
     ("Retail L/S",     0.8, "retail"),
     ("Top trader L/S", 1.0, "top"),
+]
+
+# 宏觀 components
+MACRO_COMPONENTS = [
     ("Price vs EMA50", 1.0, "ema"),
     ("Fear & Greed",   0.5, "fng"),
 ]
 
-DECISION_LABEL = {"LONG": "做多", "SHORT": "做空", "WAIT": "觀望"}
-DECISION_EMOJI = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "🟡"}
+def calc_category_score(scored):
+    total = sum(s * w for _, s, w, _ in scored)
+    max_w = sum(w for _, _, w, _ in scored)
+    return (total / max_w * 100) if max_w else 0
 
-def print_friendly(symbol, decision, confidence, price, chg_24h, ts, scored):
-    name = SYMBOL_DISPLAY.get(symbol, symbol)
-    bar = "═" * 40
-    print(f"\n  {bar}")
-    print(f"  {name} 4H Signal — {ts.strftime('%Y-%m-%d %H:%M UTC')}")
-    print(f"  {bar}\n")
-    print(f"  💰 ${price:,.2f}   24h: {chg_24h:+.2f}%\n")
+def detect_reversals(daily_klines) -> List[str]:
+    """Detect trend reversal signals from daily klines."""
+    signals = []
+    closes = [k["close"] for k in daily_klines]
+    if len(closes) < 52:
+        return signals
 
-    label = DECISION_LABEL.get(decision, decision)
-    emoji = DECISION_EMOJI.get(decision, "⚪")
-    divider = "─" * 38
+    # 1. Price vs daily EMA50 crossover
+    ema50_now = ema(closes, 50)
+    ema50_prev = ema(closes[:-1], 50)
+    if ema50_now and ema50_prev:
+        if closes[-2] < ema50_prev and closes[-1] > ema50_now:
+            signals.append(f"🟢 價格上穿日線 EMA50（偏多）")
+        elif closes[-2] > ema50_prev and closes[-1] < ema50_now:
+            signals.append(f"🔴 價格下穿日線 EMA50（偏空）")
 
-    print(f"  {divider}")
-    print(f"  {emoji} 判讀：{decision}（{label}）")
-    if decision == "WAIT" and abs(confidence) > 0.05:
-        lean = "LONG" if confidence > 0 else "SHORT"
-        lean_label = DECISION_LABEL[lean]
-        print(f"  📈 方向偏向：{lean}（{lean_label}）{confidence*100:+.1f}%")
-    elif decision != "WAIT":
-        print(f"  📊 信心度：{confidence*100:+.1f}%")
-    print(f"  {divider}\n")
+    # 2. EMA20/EMA50 golden/death cross
+    if len(closes) >= 52:
+        ema20_now = ema(closes, 20)
+        ema20_prev = ema(closes[:-1], 20)
+        if ema20_now and ema20_prev and ema50_now and ema50_prev:
+            if ema20_prev < ema50_prev and ema20_now > ema50_now:
+                signals.append(f"🟢 日線 EMA20 上穿 EMA50 金叉（偏多）")
+            elif ema20_prev > ema50_prev and ema20_now < ema50_now:
+                signals.append(f"🔴 日線 EMA20 下穿 EMA50 死叉（偏空）")
 
-    bullish = [(n, why) for n, s, w, why in scored if s > 0]
-    bearish = [(n, why) for n, s, w, why in scored if s < 0]
-    neutral = [(n, why) for n, s, w, why in scored if s == 0 and n != "VETO"]
-    veto    = [(n, why) for n, s, w, why in scored if n == "VETO"]
+    # 3. RSI extreme zone exit
+    rsi_vals = calc_rsi(closes, 14)
+    if len(rsi_vals) >= 2 and rsi_vals[-1] is not None and rsi_vals[-2] is not None:
+        if rsi_vals[-2] < 30 and rsi_vals[-1] >= 30:
+            signals.append(f"🟢 RSI 脫離超賣區 {rsi_vals[-1]:.0f}（偏多）")
+        elif rsi_vals[-2] > 70 and rsi_vals[-1] <= 70:
+            signals.append(f"🔴 RSI 脫離超買區 {rsi_vals[-1]:.0f}（偏空）")
 
-    if veto:
-        print(f"  ⛔ 否決")
-        for _, why in veto:
-            print(f"     • {why}")
-        print()
+    # 4. MACD histogram flip
+    _, _, hist = calc_macd(closes)
+    if hist and len(hist) >= 2:
+        if hist[-2] < 0 and hist[-1] > 0:
+            signals.append(f"🟢 MACD histogram 由負轉正（偏多）")
+        elif hist[-2] > 0 and hist[-1] < 0:
+            signals.append(f"🔴 MACD histogram 由正轉負（偏空）")
 
-    if bullish:
-        print(f"  ✅ 偏多訊號")
-        for _, why in bullish:
-            print(f"     • {why}")
-        print()
-
-    if bearish:
-        print(f"  ❌ 偏空訊號")
-        for _, why in bearish:
-            print(f"     • {why}")
-        print()
-
-    if neutral:
-        print(f"  ⚪ 中性（無明確訊號）")
-        for _, why in neutral:
-            print(f"     • {why}")
-        print()
-
-    print(f"  {bar}")
-
+    return signals
 
 def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
-    name = SYMBOL_DISPLAY.get(symbol, symbol)
+    sym_name = SYMBOL_DISPLAY.get(symbol, symbol)
     ts = datetime.now(timezone.utc)
     if not output_json:
-        print(f"Fetching {name}...", flush=True)
+        print(f"Fetching {sym_name}...", flush=True)
 
     klines  = fetch_klines_4h(symbol, 60)
     rates   = fetch_funding_rate(symbol)
@@ -385,83 +454,141 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
     ls_hist = fetch_long_short_ratio(symbol)
     tt_hist = fetch_top_trader_ratio(symbol)
     fng     = fetch_fear_greed()
+    daily   = fetch_daily_klines(symbol, 100)
+    etf     = fetch_etf_flow() if symbol == "BTCUSDT" else None
 
     price = klines[-1]["close"]
-    chg_24h = (klines[-1]["close"] / klines[-7]["close"] - 1) * 100  # 6 × 4h ≈ 24h
+    chg_24h = (klines[-1]["close"] / klines[-7]["close"] - 1) * 100
 
-    # Veto first
-    veto_msg = check_veto(klines)
-    if veto_msg:
-        decision = "WAIT"
-        confidence = 0.0
-        total = 0.0
-        scored = [("VETO", 0.0, 0.0, veto_msg)]
-    else:
-        # Score
-        scored = []
-        for name, weight, key in COMPONENTS:
-            if   key == "candle":   s, why = score_candle(klines)
-            elif key == "funding":  s, why = score_funding(rates)
-            elif key == "oi_price": s, why = score_oi_vs_price(oi_hist, klines)
-            elif key == "retail":   s, why = score_ls_retail(ls_hist)
-            elif key == "top":      s, why = score_top_trader(tt_hist)
-            elif key == "ema":      s, why = score_ema(klines)
-            elif key == "fng":      s, why = score_fng(fng)
-            else:                   s, why = 0, "?"
-            scored.append((name, s, weight, why))
+    # Score 行情 (derivatives)
+    market_scored = []
+    for name, weight, key in MARKET_COMPONENTS:
+        if   key == "funding":  s, why = score_funding(rates)
+        elif key == "oi_price": s, why = score_oi_vs_price(oi_hist, klines)
+        elif key == "retail":   s, why = score_ls_retail(ls_hist)
+        elif key == "top":      s, why = score_top_trader(tt_hist)
+        else:                   s, why = 0, "?"
+        market_scored.append((name, s, weight, why))
+    market_pct = calc_category_score(market_scored)
 
-        total = sum(s * w for _, s, w, _ in scored)
-        max_w = sum(w for _, _, w, _ in scored)
-        confidence = total / max_w  # [-1, +1]
-        decision = "LONG" if confidence > THRESH_LONG else ("SHORT" if confidence < THRESH_SHORT else "WAIT")
+    # Score 宏觀
+    macro_scored = []
+    for name, weight, key in MACRO_COMPONENTS:
+        if   key == "ema":  s, why = score_ema(klines)
+        elif key == "fng":  s, why = score_fng(fng)
+        else:               s, why = 0, "?"
+        macro_scored.append((name, s, weight, why))
+    macro_pct = calc_category_score(macro_scored)
 
-    if not output_json:
-        print_friendly(symbol, decision, confidence, price, chg_24h, ts, scored)
+    # Trend reversals
+    reversals = detect_reversals(daily)
+
+    # ETF info string
+    etf_str = None
+    if etf:
+        flow = etf["flow"]
+        assets = etf["assets"]
+        etf_str = f"ETF {etf['date']} 淨流{'入' if flow > 0 else '出'} ${abs(flow)/1e6:,.0f}M｜總資產 ${assets/1e9:,.1f}B"
 
     result = {
         "symbol": symbol,
         "timestamp": ts.isoformat(),
         "price": price,
         "chg_24h_pct": chg_24h,
-        "decision": decision,
-        "confidence": confidence,
-        "total_score": total,
-        "components": [{"name": n, "score": s, "weight": w, "reason": why}
-                       for n, s, w, why in scored],
+        "market_score": market_pct,
+        "macro_score": macro_pct,
+        "market_details": [{"name": n, "score": s, "weight": w, "reason": why} for n, s, w, why in market_scored],
+        "macro_details": [{"name": n, "score": s, "weight": w, "reason": why} for n, s, w, why in macro_scored],
+        "reversals": reversals,
+        "etf": etf_str,
     }
-    if output_json:
+
+    if not output_json:
+        print_dashboard(sym_name, ts, price, chg_24h, market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals)
+    else:
         print(json.dumps(result, indent=2, ensure_ascii=False))
+
     return result
 
+def print_dashboard(name, ts, price, chg_24h, market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals):
+    bar = "═" * 40
+    div = "─" * 38
+
+    print(f"\n  {bar}")
+    print(f"  {name} 市場狀態 — {ts.strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"  {bar}\n")
+    print(f"  💰 ${price:,.2f}   24h: {chg_24h:+.2f}%\n")
+
+    # 行情
+    m_emoji = "🟢" if market_pct > 10 else ("🔴" if market_pct < -10 else "⚪")
+    m_label = "偏多" if market_pct > 10 else ("偏空" if market_pct < -10 else "中性")
+    print(f"  {div}")
+    print(f"  {m_emoji} 行情（衍生品）{market_pct:+.1f}%（{m_label}）")
+    print(f"  {div}")
+    for _, s, w, why in market_scored:
+        print(f"     • {why}")
+    print()
+
+    # 宏觀
+    mc_emoji = "🟢" if macro_pct > 10 else ("🔴" if macro_pct < -10 else "⚪")
+    mc_label = "偏多" if macro_pct > 10 else ("偏空" if macro_pct < -10 else "中性")
+    print(f"  {div}")
+    print(f"  {mc_emoji} 宏觀 {macro_pct:+.1f}%（{mc_label}）")
+    print(f"  {div}")
+    for _, s, w, why in macro_scored:
+        print(f"     • {why}")
+    if etf_str:
+        print(f"     • {etf_str}")
+    print()
+
+    # 趨勢反轉
+    if reversals:
+        print(f"  {div}")
+        print(f"  🔄 趨勢反轉訊號")
+        print(f"  {div}")
+        for r in reversals:
+            print(f"     {r}")
+        print()
+
+    # 底部總覽
+    print(f"  {bar}")
+    print(f"  行情 {market_pct:+.1f}% ｜ 宏觀 {macro_pct:+.1f}% ｜ 新聞：見下方")
+    print(f"  {bar}")
+
 def send_discord(webhook: str, result: dict):
-    d = result["decision"]
-    emoji = DECISION_EMOJI.get(d, "⚪")
-    label = DECISION_LABEL.get(d, d)
-    conf = result["confidence"]
     name = SYMBOL_DISPLAY.get(result.get("symbol", ""), "")
+    mp = result["market_score"]
+    mc = result["macro_score"]
+    m_emoji = "🟢" if mp > 10 else ("🔴" if mp < -10 else "⚪")
+    mc_emoji = "🟢" if mc > 10 else ("🔴" if mc < -10 else "⚪")
+
     header = [
-        f"{emoji} **{name} 4H — {d}（{label}）**",
+        f"📊 **{name} 市場狀態**",
         f"💰 ${result['price']:,.0f}　24h: {result['chg_24h_pct']:+.2f}%",
     ]
-    if d == "WAIT" and abs(conf) > 0.05:
-        lean = "LONG" if conf > 0 else "SHORT"
-        header.append(f"📈 方向偏向：{lean}（{DECISION_LABEL[lean]}）{conf*100:+.1f}%")
-    elif d != "WAIT":
-        header.append(f"📊 信心度：{conf*100:+.1f}%")
 
-    detail = []
-    bullish = [c for c in result["components"] if c["score"] > 0]
-    bearish = [c for c in result["components"] if c["score"] < 0]
-    if bullish:
-        detail.append("✅ 偏多")
-        for c in bullish:
-            detail.append(f"  • {c['reason']}")
-    if bearish:
-        detail.append("❌ 偏空")
-        for c in bearish:
-            detail.append(f"  • {c['reason']}")
+    detail = [
+        f"{m_emoji} 行情（衍生品）{mp:+.1f}%",
+    ]
+    for c in result["market_details"]:
+        detail.append(f"  • {c['reason']}")
+    detail.append("")
+    detail.append(f"{mc_emoji} 宏觀 {mc:+.1f}%")
+    for c in result["macro_details"]:
+        detail.append(f"  • {c['reason']}")
+    if result.get("etf"):
+        detail.append(f"  • {result['etf']}")
 
     lines = header + ["```"] + detail + ["```"]
+
+    # Reversals
+    if result.get("reversals"):
+        lines.append("🔄 **趨勢反轉訊號**")
+        for r in result["reversals"]:
+            lines.append(r)
+
+    lines.append(f"行情 {mp:+.1f}% ｜ 宏觀 {mc:+.1f}%")
+
     try:
         requests.post(webhook, json={"content": "\n".join(lines)}, timeout=10)
     except Exception as e:
@@ -472,9 +599,9 @@ def append_csv(path: str, result: dict):
     with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new_file:
-            w.writerow(["symbol", "timestamp", "price", "chg_24h_pct", "decision", "confidence", "total_score"])
+            w.writerow(["symbol", "timestamp", "price", "chg_24h_pct", "market_score", "macro_score"])
         w.writerow([result.get("symbol", ""), result["timestamp"], result["price"], f"{result['chg_24h_pct']:.4f}",
-                    result["decision"], f"{result['confidence']:.4f}", f"{result['total_score']:.4f}"])
+                    f"{result['market_score']:.1f}", f"{result['macro_score']:.1f}"])
 
 def sleep_to_next_4h():
     now = datetime.now(timezone.utc)
