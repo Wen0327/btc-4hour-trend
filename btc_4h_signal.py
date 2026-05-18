@@ -64,6 +64,34 @@ THRESH_LONG = 0.30      # confidence > +30% → LONG
 THRESH_SHORT = -0.30    # confidence < -30% → SHORT
 VETO_ATR_PCT = 0.005    # 4h ATR < 0.5% of price → too quiet, veto
 
+# 2026 FOMC statement release times (ET 14:00 → UTC 18:00)
+# 2026 CPI release times (ET 08:30 → UTC 12:30)
+MACRO_EVENTS_2026 = [
+    # FOMC (remaining 2026)
+    ("FOMC", datetime(2026, 6, 17, 18, 0, tzinfo=timezone.utc)),
+    ("FOMC", datetime(2026, 7, 29, 18, 0, tzinfo=timezone.utc)),
+    ("FOMC", datetime(2026, 9, 16, 18, 0, tzinfo=timezone.utc)),
+    ("FOMC", datetime(2026, 10, 28, 18, 0, tzinfo=timezone.utc)),
+    ("FOMC", datetime(2026, 12, 9, 18, 0, tzinfo=timezone.utc)),
+    # CPI (remaining 2026)
+    ("CPI", datetime(2026, 6, 10, 12, 30, tzinfo=timezone.utc)),
+    ("CPI", datetime(2026, 7, 14, 12, 30, tzinfo=timezone.utc)),
+    ("CPI", datetime(2026, 8, 12, 12, 30, tzinfo=timezone.utc)),
+    ("CPI", datetime(2026, 9, 11, 12, 30, tzinfo=timezone.utc)),
+    ("CPI", datetime(2026, 10, 14, 12, 30, tzinfo=timezone.utc)),
+    ("CPI", datetime(2026, 11, 10, 13, 30, tzinfo=timezone.utc)),  # DST ends, ET+5
+    ("CPI", datetime(2026, 12, 10, 13, 30, tzinfo=timezone.utc)),  # DST ends, ET+5
+]
+MACRO_WINDOW_H = 6  # hours before/after event
+
+def check_macro_event(ts: datetime) -> Optional[str]:
+    for name, event_time in MACRO_EVENTS_2026:
+        diff_h = abs((ts - event_time).total_seconds()) / 3600
+        if diff_h <= MACRO_WINDOW_H:
+            direction = "後" if ts > event_time else "前"
+            return f"⚠️ {name} 公布{direction} {diff_h:.1f}h — 波動劇烈，技術面指標可能失效"
+    return None
+
 # ============================================================
 # HTTP helper with retry
 # ============================================================
@@ -457,6 +485,15 @@ def main():
             except Exception as e:
                 name = SYMBOL_DISPLAY.get(symbol, symbol)
                 print(f"Error ({name}): {e}", file=sys.stderr)
+        macro_hint = check_macro_event(datetime.now(timezone.utc))
+        if macro_hint:
+            if not args.json:
+                print(f"\n  {macro_hint}\n")
+            if args.discord:
+                try:
+                    requests.post(args.discord, json={"content": macro_hint}, timeout=10)
+                except Exception:
+                    pass
         if not args.loop:
             break
         sleep_to_next_4h()

@@ -162,7 +162,7 @@ python3 btc_4h_signal.py
 1. **加 FOMC / CPI 日曆 veto** — 公布前後 6h 強制 WAIT。FOMC 日期硬編進腳本,CPI 用第二個週二或硬編
 2. **加 ETF 流量** — SoSoValue 有免費 endpoint(`/api/openapi/etf/...`),拿 BTC 現貨 ETF 日流量,單日流出 > $300M 強制 WAIT
 3. **加美股 correlation veto** — 抓 SPY 4h klines(Binance 沒有,要用 yfinance 或 Alpaca),美股盤中跌 > 1.5% 加重 SHORT 權重
-4. **Coinglass 清算地圖** — 付費 API(~$30/月),拿 ±5% 範圍內清算規模,加當「距離清算牆比例」維度。**只在前三項都加完後再考慮花錢**
+4. **EMA200 雙重確認** — 現有 EMA50 維度在盤整區間會產生噪音。加 EMA200 區分「真轉向」vs「只是回調」：價格 > EMA50 > EMA200 = 強多、價格 < EMA50 < EMA200 = 強空、不一致 = 打折。2026-05-18 測試結果：BTC 弱空（EMA50 > EMA200 但價格 < EMA50）、ETH 強空（價格 < EMA50 < EMA200）
 5. **回測 module** — 用前 4 週累積的 signal 配合歷史 4h 線跑 grid search,優化權重和門檻
 6. **風控層** — stop loss、position sizing、max DD halt。**只有要上實盤才需要**
 7. **實盤接 Binance Futures API** — **絕對不要在 Phase 2 通過前做這個**
