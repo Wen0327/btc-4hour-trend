@@ -416,27 +416,6 @@ def send_discord(webhook: str, result: dict):
     except Exception as e:
         print(f"Discord send failed: {e}", file=sys.stderr)
 
-def send_discord_hint(webhook: str):
-    lines = [
-        "```",
-        "📖 判讀規則",
-        "─────────────────────────",
-        "信心度 > +30%  → LONG（做多）",
-        "信心度 < -30%  → SHORT（做空）",
-        "中間           → WAIT（觀望）",
-        "",
-        "📐 7 個評分維度",
-        "─────────────────────────",
-        "K線突破 ｜ 資金費率 ｜ OI vs 價格",
-        "散戶多空比 ｜ 大戶多空比",
-        "EMA50 趨勢 ｜ 恐懼貪婪指數",
-        "```",
-    ]
-    try:
-        requests.post(webhook, json={"content": "\n".join(lines)}, timeout=10)
-    except Exception as e:
-        print(f"Discord hint send failed: {e}", file=sys.stderr)
-
 def append_csv(path: str, result: dict):
     new_file = not os.path.exists(path)
     with open(path, "a", newline="", encoding="utf-8") as f:
@@ -478,8 +457,6 @@ def main():
             except Exception as e:
                 name = SYMBOL_DISPLAY.get(symbol, symbol)
                 print(f"Error ({name}): {e}", file=sys.stderr)
-        if args.discord:
-            send_discord_hint(args.discord)
         if not args.loop:
             break
         sleep_to_next_4h()
