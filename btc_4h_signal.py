@@ -85,12 +85,31 @@ MACRO_EVENTS_2026 = [
 ]
 MACRO_WINDOW_H = 6  # hours before/after event
 
+def fetch_fed_rate() -> Optional[str]:
+    api_key = os.environ.get("FRED_API_KEY")
+    if not api_key:
+        return None
+    try:
+        r = requests.get("https://api.stlouisfed.org/fred/series/observations",
+                         params={"series_id": "EFFR", "api_key": api_key,
+                                 "file_type": "json", "sort_order": "desc", "limit": 1},
+                         timeout=10)
+        r.raise_for_status()
+        obs = r.json().get("observations", [])
+        if obs:
+            return obs[0]["value"]
+    except Exception:
+        pass
+    return None
+
 def check_macro_event(ts: datetime) -> Optional[str]:
     for name, event_time in MACRO_EVENTS_2026:
         diff_h = abs((ts - event_time).total_seconds()) / 3600
         if diff_h <= MACRO_WINDOW_H:
             direction = "後" if ts > event_time else "前"
-            return f"⚠️ {name} 公布{direction} {diff_h:.1f}h — 波動劇烈，技術面指標可能失效"
+            rate = fetch_fed_rate()
+            rate_str = f"｜當前利率 {rate}%" if rate else ""
+            return f"⚠️ {name} 公布{direction} {diff_h:.1f}h{rate_str} — 波動劇烈，技術面指標可能失效"
     return None
 
 NEWS_SENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".news_sent.json")
@@ -479,6 +498,7 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
     fng     = fetch_fear_greed()
     daily   = fetch_daily_klines(symbol, 100)
     etf     = fetch_etf_flow() if symbol == "BTCUSDT" else None
+    fed_rate = fetch_fed_rate() if symbol == "BTCUSDT" else None
 
     price = klines[-1]["close"]
     chg_24h = (klines[-1]["close"] / klines[-7]["close"] - 1) * 100
@@ -506,12 +526,13 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
     # Trend reversals
     reversals = detect_reversals(daily)
 
-    # ETF info string
+    # ETF + Fed rate info
     etf_str = None
     if etf:
         flow = etf["flow"]
         assets = etf["assets"]
         etf_str = f"ETF {etf['date']} 淨流{'入' if flow > 0 else '出'} ${abs(flow)/1e6:,.0f}M｜總資產 ${assets/1e9:,.1f}B"
+    fed_str = f"Fed 利率 {fed_rate}%" if fed_rate else None
 
     result = {
         "symbol": symbol,
@@ -524,16 +545,17 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         "macro_details": [{"name": n, "score": s, "weight": w, "reason": why} for n, s, w, why in macro_scored],
         "reversals": reversals,
         "etf": etf_str,
+        "fed_rate": fed_str,
     }
 
     if not output_json:
-        print_dashboard(sym_name, ts, price, chg_24h, market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals)
+        print_dashboard(sym_name, ts, price, chg_24h, market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals, fed_str)
     else:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
     return result
 
-def print_dashboard(name, ts, price, chg_24h, market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals):
+def print_dashboard(name, ts, price, chg_24h, market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals, fed_str=None):
     bar = "═" * 40
     div = "─" * 38
 
@@ -562,6 +584,8 @@ def print_dashboard(name, ts, price, chg_24h, market_pct, market_scored, macro_p
         print(f"     • {why}")
     if etf_str:
         print(f"     • {etf_str}")
+    if fed_str:
+        print(f"     • {fed_str}")
     print()
 
     # 趨勢反轉
@@ -601,6 +625,8 @@ def send_discord(webhook: str, result: dict):
         detail.append(f"  • {c['reason']}")
     if result.get("etf"):
         detail.append(f"  • {result['etf']}")
+    if result.get("fed_rate"):
+        detail.append(f"  • {result['fed_rate']}")
 
     lines = header + ["```"] + detail + ["```"]
 
