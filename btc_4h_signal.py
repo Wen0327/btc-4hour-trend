@@ -385,7 +385,27 @@ def score_top_trader(tt_hist):
         return -1.0, f"大戶多空比 {r:.2f}(大戶偏空、跟單)"
     return 0.0, f"大戶多空比 {r:.2f}(中性)"
 
-def score_ema(klines):
+def score_ema(klines, daily_klines=None):
+    """EMA50 + EMA200 雙重確認（用日線）。有日線用日線，沒有 fallback 到 4h。"""
+    if daily_klines and len(daily_klines) >= 201:
+        closes = [k["close"] for k in daily_klines]
+        price = closes[-1]
+        e50 = ema(closes, 50)
+        e200 = ema(closes, 200)
+        if e50 is None or e200 is None:
+            return 0.0, "日線資料不足"
+        d50 = (price / e50 - 1) * 100
+        d200 = (price / e200 - 1) * 100
+        if price > e50 and e50 > e200:
+            return 1.0, f"強多：價格 > EMA50 > EMA200（EMA50 {d50:+.1f}%｜EMA200 {d200:+.1f}%）"
+        if price < e50 and e50 < e200:
+            return -1.0, f"強空：價格 < EMA50 < EMA200（EMA50 {d50:+.1f}%｜EMA200 {d200:+.1f}%）"
+        if price > e50 and e50 < e200:
+            return 0.3, f"弱多：價格 > EMA50 但 EMA50 < EMA200（可能只是反彈）"
+        if price < e50 and e50 > e200:
+            return -0.3, f"弱空：價格 < EMA50 但 EMA50 > EMA200（可能只是回調）"
+        return 0.0, f"中性：EMA50 ${e50:,.0f}（{d50:+.1f}%）EMA200 ${e200:,.0f}（{d200:+.1f}%）"
+    # Fallback: 4h EMA50
     closes = [k["close"] for k in klines]
     e = ema(closes, 50)
     if e is None:
@@ -496,7 +516,7 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
     ls_hist = fetch_long_short_ratio(symbol)
     tt_hist = fetch_top_trader_ratio(symbol)
     fng     = fetch_fear_greed()
-    daily   = fetch_daily_klines(symbol, 100)
+    daily   = fetch_daily_klines(symbol, 250)
     etf     = fetch_etf_flow() if symbol == "BTCUSDT" else None
     fed_rate = fetch_fed_rate() if symbol == "BTCUSDT" else None
 
@@ -517,7 +537,7 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
     # Score 宏觀
     macro_scored = []
     for name, weight, key in MACRO_COMPONENTS:
-        if   key == "ema":  s, why = score_ema(klines)
+        if   key == "ema":  s, why = score_ema(klines, daily)
         elif key == "fng":  s, why = score_fng(fng)
         else:               s, why = 0, "?"
         macro_scored.append((name, s, weight, why))

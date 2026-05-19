@@ -159,10 +159,10 @@ python3 btc_4h_signal.py
 
 按優先序:
 
-1. ~~**FOMC / CPI 日曆**~~ ✅ 已加 hint（2026-05-18），前後 6h 顯示警告，不強制 WAIT。日期硬編 2026，年底需更新
+1. ~~**FOMC / CPI 日曆 + Fed 利率**~~ ✅ 全部完成（2026-05-19）。FOMC/CPI hint + FRED API 抓即時利率顯示在宏觀區塊
 2. ~~**ETF 流量**~~ ❌ 放棄 — 資料收盤後才公布，對未來 4h 預測有滯後性，實測無效（2026-05-18）
-3. **加美股 correlation veto** — 抓 SPY 4h klines(Binance 沒有,要用 yfinance 或 Alpaca),美股盤中跌 > 1.5% 加重 SHORT 權重
-4. **EMA200 雙重確認** — 現有 EMA50 維度在盤整區間會產生噪音。加 EMA200 區分「真轉向」vs「只是回調」：價格 > EMA50 > EMA200 = 強多、價格 < EMA50 < EMA200 = 強空、不一致 = 打折。2026-05-18 測試結果：BTC 弱空（EMA50 > EMA200 但價格 < EMA50）、ETH 強空（價格 < EMA50 < EMA200）
+3. ~~**美股 correlation veto**~~ ❌ 放棄 — BTC 與 SPY/MSTR/GLD/DXY 相關性都不穩定（0.1~0.5），且無領先關係，只會增加噪音（2026-05-18 驗證）
+4. ~~**EMA200 雙重確認**~~ ✅ 完成（2026-05-19）。日線 EMA50+EMA200 雙重確認，強多/弱多/弱空/強空 四級判讀
 5. **回測 module** — 用前 4 週累積的 signal 配合歷史 4h 線跑 grid search,優化權重和門檻
 6. **風控層** — stop loss、position sizing、max DD halt。**只有要上實盤才需要**
 7. **實盤接 Binance Futures API** — **絕對不要在 Phase 2 通過前做這個**
