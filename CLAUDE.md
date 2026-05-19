@@ -163,7 +163,7 @@ python3 btc_4h_signal.py
 2. ~~**ETF 流量**~~ ❌ 放棄 — 資料收盤後才公布，對未來 4h 預測有滯後性，實測無效（2026-05-18）
 3. ~~**美股 correlation veto**~~ ❌ 放棄 — BTC 與 SPY/MSTR/GLD/DXY 相關性都不穩定（0.1~0.5），且無領先關係，只會增加噪音（2026-05-18 驗證）
 4. ~~**EMA200 雙重確認**~~ ✅ 完成（2026-05-19）。日線 EMA50+EMA200 雙重確認，強多/弱多/弱空/強空 四級判讀
-5. **回測 module** — 用前 4 週累積的 signal 配合歷史 4h 線跑 grid search,優化權重和門檻
+5. **回測 module** — dashboard v2 從 2026-05-19 開始收資料，預計 **2026-06-16** 回測。用 signals.csv 配合歷史 4h 線，驗證行情/宏觀分數的參考價值
 6. **風控層** — stop loss、position sizing、max DD halt。**只有要上實盤才需要**
 7. **實盤接 Binance Futures API** — **絕對不要在 Phase 2 通過前做這個**
 
