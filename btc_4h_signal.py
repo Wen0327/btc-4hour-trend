@@ -93,8 +93,23 @@ def check_macro_event(ts: datetime) -> Optional[str]:
             return f"⚠️ {name} 公布{direction} {diff_h:.1f}h — 波動劇烈，技術面指標可能失效"
     return None
 
+NEWS_SENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".news_sent.json")
+
+def _load_sent_ids() -> set:
+    try:
+        with open(NEWS_SENT_PATH, "r") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+def _save_sent_ids(ids: set):
+    # Only keep last 200 to prevent file growing forever
+    recent = list(ids)[-200:]
+    with open(NEWS_SENT_PATH, "w") as f:
+        json.dump(recent, f)
+
 def fetch_news_titles(limit=15) -> List[str]:
-    """Fetch BTC news titles from SoSoValue."""
+    """Fetch BTC news titles from SoSoValue, skip already sent."""
     api_key = os.environ.get("SOSOVALUE_API_KEY")
     if not api_key:
         return []
@@ -105,12 +120,20 @@ def fetch_news_titles(limit=15) -> List[str]:
                          timeout=10)
         r.raise_for_status()
         items = r.json().get("data", {}).get("list", [])
+        sent_ids = _load_sent_ids()
         titles = []
+        new_ids = set()
         for item in items:
+            nid = item.get("id", "")
+            if nid in sent_ids:
+                continue
             en = [m for m in item.get("multilanguageContent", []) if m["language"] == "en"]
             title = en[0].get("title") if en else None
             if title and len(title.strip()) > 10:
                 titles.append(title.strip())
+                new_ids.add(nid)
+        # Save all (old + new)
+        _save_sent_ids(sent_ids | new_ids)
         return titles
     except Exception:
         return []

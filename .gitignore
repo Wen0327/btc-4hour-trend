@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 signals.csv
 run.log
+.news_sent.json
