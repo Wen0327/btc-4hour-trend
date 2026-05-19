@@ -419,11 +419,19 @@ def score_ema(klines, daily_klines=None):
     return 0.0, f"現價 ${price:.0f} ≈ 4h EMA50 ${e:.0f}"
 
 def score_fng(value):
-    if value < 30:
-        return 1.0, f"F&G {value}(恐懼、反向偏多)"
-    if value > 70:
-        return -1.0, f"F&G {value}(貪婪、反向偏空)"
-    return 0.0, f"F&G {value}(中性)"
+    # 線性映射：0(極度恐懼)→+1.0, 50(中性)→0.0, 100(極度貪婪)→-1.0
+    score = -(value - 50) / 50  # [-1, +1]
+    if value < 25:
+        label = "極度恐懼"
+    elif value < 40:
+        label = "恐懼"
+    elif value <= 60:
+        label = "中性"
+    elif value <= 75:
+        label = "貪婪"
+    else:
+        label = "極度貪婪"
+    return round(score, 2), f"F&G {value}/100（{label}）{score:+.2f}"
 
 # ============================================================
 # Veto
@@ -594,11 +602,9 @@ def print_dashboard(name, ts, price, chg_24h, market_pct, market_scored, macro_p
         print(f"     • {why}")
     print()
 
-    # 宏觀
-    mc_emoji = "🟢" if macro_pct > 10 else ("🔴" if macro_pct < -10 else "⚪")
-    mc_label = "偏多" if macro_pct > 10 else ("偏空" if macro_pct < -10 else "中性")
+    # 宏觀（每個維度獨立顯示分數）
     print(f"  {div}")
-    print(f"  {mc_emoji} 宏觀 {macro_pct:+.1f}%（{mc_label}）")
+    print(f"  🌍 宏觀")
     print(f"  {div}")
     for _, s, w, why in macro_scored:
         print(f"     • {why}")
@@ -619,7 +625,8 @@ def print_dashboard(name, ts, price, chg_24h, market_pct, market_scored, macro_p
 
     # 底部總覽
     print(f"  {bar}")
-    print(f"  行情 {market_pct:+.1f}% ｜ 宏觀 {macro_pct:+.1f}% ｜ 新聞：見下方")
+    macro_parts = [f"{n} {s:+.2f}" for n, s, w, _ in macro_scored]
+    print(f"  行情 {market_pct:+.1f}% ｜ {' ｜ '.join(macro_parts)}")
     print(f"  {bar}")
 
 def send_discord(webhook: str, result: dict):
@@ -640,7 +647,7 @@ def send_discord(webhook: str, result: dict):
     for c in result["market_details"]:
         detail.append(f"  • {c['reason']}")
     detail.append("")
-    detail.append(f"{mc_emoji} 宏觀 {mc:+.1f}%")
+    detail.append("🌍 宏觀")
     for c in result["macro_details"]:
         detail.append(f"  • {c['reason']}")
     if result.get("etf"):
@@ -656,7 +663,8 @@ def send_discord(webhook: str, result: dict):
         for r in result["reversals"]:
             lines.append(r)
 
-    lines.append(f"行情 {mp:+.1f}% ｜ 宏觀 {mc:+.1f}%")
+    macro_parts = [f"{c['name']} {c['score']:+.2f}" for c in result["macro_details"]]
+    lines.append(f"行情 {mp:+.1f}% ｜ {' ｜ '.join(macro_parts)}")
 
     try:
         requests.post(webhook, json={"content": "\n".join(lines)}, timeout=10)
