@@ -1,117 +1,121 @@
-# BTC 4H Signal
+# BTC/ETH Signal v4
 
-每 4 小時抓 Binance Futures 公開 API + Fear & Greed,加權打 7 項分數,輸出 LONG / SHORT / WAIT。
+布林通道均值回歸 + KD/RSI/MACD 確認的市場狀態儀表板。
+每 4 小時抓 Binance Futures 公開 API + 多個免費資料源，輸出預測信號 + 行情/宏觀分析。
 
 ## 安裝
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install requests
-python btc_4h_signal.py
 ```
 
-不需要任何 API key。所有資料源都是公開 endpoint。
+## 設定
+
+將 `.env` 放在專案根目錄：
+
+```
+DISCORD_WEBHOOK=https://discord.com/api/webhooks/xxx
+SOSOVALUE_API_KEY=your_key_here
+FRED_API_KEY=your_key_here
+GEMINI_API_KEY=your_key_here
+```
+
+- `DISCORD_WEBHOOK` — Discord 通知（必要）
+- `SOSOVALUE_API_KEY` — ETF 流量 + 新聞標題（免費，[sosovalue.com/developer](https://sosovalue.com/developer)）
+- `FRED_API_KEY` — Fed 利率 + FOMC 預測（免費，[fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/fred/)）
+- `GEMINI_API_KEY` — 備用，目前未使用
 
 ## 用法
 
 ```bash
-# 跑一次,印到 stdout
-python btc_4h_signal.py
-
-# JSON 輸出(給其他程式吃)
-python btc_4h_signal.py --json
-
-# 持續跑,每 4h 邊界(UTC 00:00 / 04:00 / 08:00 ...)自動觸發
-python btc_4h_signal.py --loop
-
-# 結果送 Discord
-python btc_4h_signal.py --discord https://discord.com/api/webhooks/xxx
-
-# 每次結果 append 到 CSV(自動建立 header)
-python btc_4h_signal.py --log signals.csv
-
-# 全部一起
-python btc_4h_signal.py --loop --discord https://... --log signals.csv
+python btc_4h_signal.py                # 跑一次
+python btc_4h_signal.py --json         # JSON 輸出
+python btc_4h_signal.py --loop         # 每 4h 自動跑
+python btc_4h_signal.py --log x.csv    # 記錄到 CSV
+python btc_4h_signal.py --help-signal  # 顯示模型說明
 ```
 
-### 排程方式(macOS / Linux)
+Discord webhook 會自動從 `.env` 讀取，不需要手動傳 `--discord`。
+
+### 排程（macOS launchd）
+
+已設定 `~/Library/LaunchAgents/com.btc4h.signal.plist`，每 4h 自動執行。
+
+```bash
+# 查看狀態
+launchctl list | grep btc4h
+
+# 停止
+launchctl unload ~/Library/LaunchAgents/com.btc4h.signal.plist
+
+# 重新載入
+launchctl load ~/Library/LaunchAgents/com.btc4h.signal.plist
+```
+
+### 排程（cron 替代方案）
+
 ```bash
 crontab -e
-# 每 4h 整點過 5 分跑一次(避開 API rate limit 高峰)
-5 0,4,8,12,16,20 * * * cd /Users/wen/btc-signal && /usr/bin/python3 btc_4h_signal.py --log signals.csv --discord https://... >> run.log 2>&1
+5 0,4,8,12,16,20 * * * cd /path/to/project && .venv/bin/python3 btc_4h_signal.py --log signals.csv >> run.log 2>&1
 ```
 
-### Windows 排程
-用工作排程器(Task Scheduler),Action 設為:
-- Program: `python`
-- Args: `C:\path\to\btc_4h_signal.py --log C:\path\signals.csv`
-- Trigger: 每 4h 重複
+## V4 預測模型
 
-## 七個維度
+**主信號**：布林通道（20,2）均值回歸
+- 價格觸及下軌 → 候選 LONG
+- 價格觸及上軌 → 候選 SHORT
+- 通道內 → WAIT
 
-| 維度 | 權重 | +1 條件 | -1 條件 |
-|---|---|---|---|
-| 4h candle | 1.0 | 上根突破前高 + 漲 >0.3% | 跌破前低 + 跌 <-0.3% |
-| Funding rate | 1.5 | 仍負且續轉負 | 仍正且續轉正 |
-| OI vs price | 1.2 | OI 升 + 價跌(擠空 setup) | OI 升 + 價漲(過熱) |
-| Retail L/S | 0.8 | <0.8(散戶偏空 → 反向) | >1.5(散戶偏多 → 反向) |
-| Top trader L/S | 1.0 | >1.5(大戶偏多、跟單) | <0.8(大戶偏空、跟單) |
-| 現價 vs EMA50(4h) | 1.0 | 高於 +0.5% | 低於 -0.5% |
-| F&G Index | 0.5 | <30(恐懼、反向) | >70(貪婪、反向) |
+**確認指標**（至少 1 個才觸發）：
+- RSI(14) < 30 超賣 / > 70 超買
+- KD(14,3,3) K < 20 超賣 / > 80 超買
+- MACD histogram 收斂
 
-**最高總分 ±6.5。Confidence = total / max_weight ∈ [-1, +1]**
+回測結果（2.5 個月，23 筆信號）：24h 勝率 60.9%，PF 3.32。
 
-- Confidence > +30% → LONG
-- Confidence < -30% → SHORT
-- 中間 → WAIT
+## 儀表板資訊
 
-## 否決條件(任一觸發直接 WAIT)
+### 行情（衍生品）
+| 指標 | 說明 |
+|---|---|
+| Funding rate | 正=多頭付費（偏空）、負=空頭付費（偏多） |
+| OI vs 價格 | OI升+價跌=擠空 / OI升+價漲=過熱 |
+| 散戶多空比 | 反向指標 |
+| 大戶多空比 | 跟單指標 |
 
-- 4h ATR / 價格 < 0.5%(波動異常低、等突破)
+### 宏觀
+| 指標 | 說明 |
+|---|---|
+| EMA50+200 | 日線雙重確認，強多/弱多/弱空/強空 |
+| F&G 0-100 | 線性打分，恐懼偏多、貪婪偏空 |
+| ETF 日流量 | BTC 現貨 ETF 淨流入/流出（有滯後性） |
+| Fed 利率 | 當前利率 + FOMC 預期年底升降碼數 |
 
-## 必須手動補的東西
+### 趨勢反轉訊號（有觸發才顯示）
+- 價格穿越日線 EMA50
+- EMA20/EMA50 金叉/死叉
+- RSI 脫離超買/超賣區
+- MACD histogram 翻轉
 
-腳本沒做到的(你自己加 veto):
-1. **FOMC / CPI 公布前後 6 小時** — 改成 WAIT
-2. **ETF 單日流出 > $300M** — 改成 WAIT 或加重 SHORT 權重
-3. **Coinglass 清算地圖** — 免費 API 有限,要付費才能拿即時 heatmap
-4. **美股盤中跌 >1.5%** — BTC 跟美股相關性 0.6,大跌時加重 SHORT
-
-如果你要加,在 `check_veto()` 函式裡擴充就好。
+### FOMC/CPI 提示
+公布前後 6h 自動顯示警告。2026 年日期已硬編，年底需更新。
 
 ## 重要警告
 
-**這只是一個 starting framework,不是已驗證的 alpha**。
+**這是研究框架，不是已驗證的交易策略。**
 
-1. 七個權重和兩個 threshold(+0.3 / -0.3)都是猜的。**先 paper trade 至少 4 週**,記錄每筆 signal 和實際結果,再調參數。
-2. 不要直接 leverage 拿真金實彈跑。signals.csv 跑一個月後,把每筆 signal 假裝下 $100 倉位,看 win rate 和 R:R。低於 win rate 45% 或 PF < 1.2 → 不能上實盤。
-3. **這個腳本沒做風控**。沒有 stop loss、沒有 position sizing、沒有 max drawdown halt。實盤要自己接這些。
-4. Binance Futures 公開 API rate limit 寬鬆(2400 req/min),每 4h 跑一輪只用 7 個 request,沒問題。但若改成 1m / 5m 高頻,要加 backoff。
+1. V4 模型的回測樣本偏少（23 筆），不能作為上實盤的依據
+2. 均值回歸策略在趨勢行情中可能被打爆
+3. 腳本沒有風控（無 stop loss、position sizing、max drawdown halt）
+4. 預計 2026-06-16 用 4 週累積的 live data 回測驗證
 
-## Output 範例
+## 資料源
 
-```
-================================================================
-BTC 4H Signal — 2026-05-15 04:00:00 UTC
-================================================================
-Fetching...
-
-BTC: $80,912.00   24h: +1.27%
-
-     4h candle          +0.00 × 1.0 = +0.00  上根 4h +0.20%、區間內
-  ↑↑ Funding rate       +1.00 × 1.5 = +1.50  資金費 -0.0200%、續轉負(空頭付費加重)
-  ↑↑ OI vs price        +1.00 × 1.2 = +1.20  OI +0.85% + 價 -0.42% (新空進、擠空 setup)
-  ↓↓ Retail L/S         -1.00 × 0.8 = -0.80  散戶多空比 1.82(散戶偏多 → 反向偏空)
-  ↓↓ Top trader L/S     -1.00 × 1.0 = -1.00  大戶多空比 0.68(大戶偏空、跟單)
-  ↑↑ Price vs EMA50     +1.00 × 1.0 = +1.00  現價 $80912 > 4h EMA50 $79998 (+1.14%)
-     Fear & Greed       +0.00 × 0.5 = +0.00  F&G 38(中性)
-
-Total: +1.90   Confidence: +30.2%
-
-→ Decision: LONG
-```
-
-## 之後想擴充的方向
-
-1. 連接discord webhook
-2. 加 SoSoValue 拿 ETF 即時流量
-3. 寫個簡單回測 module:讀 `signals.csv` + Binance 歷史 4h 線,算每個 signal 後 4h、12h、24h、48h 的實際報酬
-4. 用回測結果反推最佳 threshold 和 weights(grid search)
+| 來源 | 用途 | 費用 |
+|---|---|---|
+| Binance Futures API | K線、Funding、OI、多空比 | 免費 |
+| Alternative.me | Fear & Greed Index | 免費 |
+| SoSoValue API | ETF 流量、新聞標題 | 免費（需 key） |
+| FRED API | Fed 利率、FOMC 預測 | 免費（需 key） |
