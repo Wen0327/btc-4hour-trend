@@ -65,6 +65,9 @@ THRESH_LONG = 0.30      # confidence > +30% → LONG
 THRESH_SHORT = -0.30    # confidence < -30% → SHORT
 VETO_ATR_PCT = 0.005    # 4h ATR < 0.5% of price → too quiet, veto
 
+# Feature toggles
+ENABLE_NEWS = False      # 新聞標題輸出
+
 # 2026 FOMC statement release times (ET 14:00 → UTC 18:00)
 # 2026 CPI release times (ET 08:30 → UTC 12:30)
 MACRO_EVENTS_2026 = [
@@ -730,24 +733,25 @@ def main():
                 except Exception:
                     pass
         # News headlines
-        news = fetch_news_titles(15)
-        if news:
-            if not args.json:
-                print(f"\n  {'─' * 38}")
-                print(f"  📰 最新 BTC 相關新聞")
-                print(f"  {'─' * 38}")
-                for t in news[:10]:
-                    print(f"  • {t[:80]}")
-                print()
-            if args.discord:
-                lines = ["📰 **BTC 相關新聞**", "```"]
-                for t in news[:10]:
-                    lines.append(f"• {t[:80]}")
-                lines.append("```")
-                try:
-                    requests.post(args.discord, json={"content": "\n".join(lines)}, timeout=10)
-                except Exception:
-                    pass
+        if ENABLE_NEWS:
+            news = fetch_news_titles(15)
+            if news:
+                if not args.json:
+                    print(f"\n  {'─' * 38}")
+                    print(f"  📰 最新 BTC 相關新聞")
+                    print(f"  {'─' * 38}")
+                    for t in news[:10]:
+                        print(f"  • {t[:80]}")
+                    print()
+                if args.discord:
+                    lines = ["📰 **BTC 相關新聞**", "```"]
+                    for t in news[:10]:
+                        lines.append(f"• {t[:80]}")
+                    lines.append("```")
+                    try:
+                        requests.post(args.discord, json={"content": "\n".join(lines)}, timeout=10)
+                    except Exception:
+                        pass
         if not args.loop:
             break
         sleep_to_next_4h()
