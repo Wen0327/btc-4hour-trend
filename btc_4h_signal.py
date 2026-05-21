@@ -260,6 +260,31 @@ def fetch_etf_flow() -> Optional[Dict]:
 # ============================================================
 # Technical helpers
 # ============================================================
+def bollinger(closes: List[float], period: int = 20, std_mult: float = 2):
+    if len(closes) < period:
+        return None, None, None
+    sma = sum(closes[-period:]) / period
+    variance = sum((c - sma)**2 for c in closes[-period:]) / period
+    std = variance ** 0.5
+    return sma, sma + std_mult * std, sma - std_mult * std
+
+def calc_kd(klines: List[dict], period: int = 14, smooth_k: int = 3, smooth_d: int = 3):
+    if len(klines) < period + smooth_k + smooth_d:
+        return None, None
+    raw_k = []
+    for i in range(period - 1, len(klines)):
+        window = klines[i - period + 1:i + 1]
+        lowest = min(k["low"] for k in window)
+        highest = max(k["high"] for k in window)
+        raw_k.append((klines[i]["close"] - lowest) / (highest - lowest) * 100 if highest != lowest else 50)
+    k_vals = []
+    for i in range(smooth_k - 1, len(raw_k)):
+        k_vals.append(sum(raw_k[i - smooth_k + 1:i + 1]) / smooth_k)
+    d_vals = []
+    for i in range(smooth_d - 1, len(k_vals)):
+        d_vals.append(sum(k_vals[i - smooth_d + 1:i + 1]) / smooth_d)
+    return k_vals[-1] if k_vals else None, d_vals[-1] if d_vals else None
+
 def ema(values: List[float], period: int) -> Optional[float]:
     if len(values) < period:
         return None
@@ -521,7 +546,7 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
     if not output_json:
         print(f"Fetching {sym_name}...", flush=True)
 
-    klines  = fetch_klines_4h(symbol, 60)
+    klines  = fetch_klines_4h(symbol, 80)
     rates   = fetch_funding_rate(symbol)
     oi_hist = fetch_open_interest_hist(symbol)
     ls_hist = fetch_long_short_ratio(symbol)
@@ -554,6 +579,60 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         macro_scored.append((name, s, weight, why))
     macro_pct = calc_category_score(macro_scored)
 
+    # V4 Prediction: Bollinger + confirmations
+    closes_4h = [k["close"] for k in klines]
+    mid, upper, lower = bollinger(closes_4h, 20, 2)
+    v4_decision = "WAIT"
+    v4_reasons = []
+    if mid and len(klines) >= 2:
+        prev_price = klines[-2]["close"]
+        touch_lower = prev_price >= lower and price < lower
+        touch_upper = prev_price <= upper and price > upper
+
+        if touch_lower or touch_upper:
+            # Check confirmations
+            rsi_vals = calc_rsi(closes_4h, 14)
+            rsi_now = rsi_vals[-1] if rsi_vals and rsi_vals[-1] is not None else None
+            kd_k, kd_d = calc_kd(klines, 14, 3, 3)
+            _, _, m_hist = calc_macd(closes_4h)
+            hist_now = m_hist[-1] if m_hist and len(m_hist) >= 1 else None
+            hist_prev = m_hist[-2] if m_hist and len(m_hist) >= 2 else None
+
+            confirms = []
+            if touch_lower:
+                v4_reasons.append(f"價格觸及布林下軌 ${lower:,.0f}")
+                if rsi_now and rsi_now < 30:
+                    confirms.append(f"RSI {rsi_now:.0f} 超賣")
+                if kd_k and kd_k < 20:
+                    confirms.append(f"K {kd_k:.0f} 超賣")
+                if hist_now and hist_prev and hist_now < 0 and hist_now > hist_prev:
+                    confirms.append("MACD 空頭收斂")
+                if len(confirms) >= 1:
+                    v4_decision = "LONG"
+            elif touch_upper:
+                v4_reasons.append(f"價格觸及布林上軌 ${upper:,.0f}")
+                if rsi_now and rsi_now > 70:
+                    confirms.append(f"RSI {rsi_now:.0f} 超買")
+                if kd_k and kd_k > 80:
+                    confirms.append(f"K {kd_k:.0f} 超買")
+                if hist_now and hist_prev and hist_now > 0 and hist_now < hist_prev:
+                    confirms.append("MACD 多頭收斂")
+                if len(confirms) >= 1:
+                    v4_decision = "SHORT"
+
+            if confirms:
+                v4_reasons.extend(confirms)
+
+    # Band info for display
+    band_info = None
+    if mid:
+        band_width = (upper - lower) / mid * 100
+        band_info = {
+            "mid": mid, "upper": upper, "lower": lower,
+            "width": band_width,
+            "pos": "上軌上方" if price > upper else ("下軌下方" if price < lower else "通道內"),
+        }
+
     # Trend reversals
     reversals = detect_reversals(daily)
 
@@ -570,6 +649,9 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         "timestamp": ts.isoformat(),
         "price": price,
         "chg_24h_pct": chg_24h,
+        "v4_decision": v4_decision,
+        "v4_reasons": v4_reasons,
+        "band_info": band_info,
         "market_score": market_pct,
         "macro_score": macro_pct,
         "market_details": [{"name": n, "score": s, "weight": w, "reason": why} for n, s, w, why in market_scored],
@@ -580,13 +662,18 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
     }
 
     if not output_json:
-        print_dashboard(sym_name, ts, price, chg_24h, market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals, fed_str)
+        print_dashboard(sym_name, ts, price, chg_24h, v4_decision, v4_reasons, band_info,
+                        market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals, fed_str)
     else:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
     return result
 
-def print_dashboard(name, ts, price, chg_24h, market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals, fed_str=None):
+DECISION_LABEL = {"LONG": "做多", "SHORT": "做空", "WAIT": "觀望"}
+DECISION_EMOJI = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "🟡"}
+
+def print_dashboard(name, ts, price, chg_24h, v4_decision, v4_reasons, band_info,
+                    market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals, fed_str=None):
     bar = "═" * 40
     div = "─" * 38
 
@@ -594,6 +681,24 @@ def print_dashboard(name, ts, price, chg_24h, market_pct, market_scored, macro_p
     print(f"  {name} 市場狀態 — {ts.strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"  {bar}\n")
     print(f"  💰 ${price:,.2f}   24h: {chg_24h:+.2f}%\n")
+
+    # V4 Prediction
+    d_emoji = DECISION_EMOJI.get(v4_decision, "⚪")
+    d_label = DECISION_LABEL.get(v4_decision, v4_decision)
+    print(f"  {div}")
+    print(f"  {d_emoji} 預測：{v4_decision}（{d_label}）")
+    if v4_reasons:
+        for r in v4_reasons:
+            print(f"     • {r}")
+    elif band_info:
+        print(f"     • 布林通道{band_info['pos']}，無觸發信號")
+    print(f"  {div}\n")
+
+    # Bollinger info
+    if band_info:
+        print(f"  📊 布林通道（20,2）寬度 {band_info['width']:.1f}%")
+        print(f"     上軌 ${band_info['upper']:,.0f} ｜ 中軌 ${band_info['mid']:,.0f} ｜ 下軌 ${band_info['lower']:,.0f}")
+        print()
 
     # 行情
     m_emoji = "🟢" if market_pct > 10 else ("🔴" if market_pct < -10 else "⚪")
@@ -635,18 +740,26 @@ def print_dashboard(name, ts, price, chg_24h, market_pct, market_scored, macro_p
 def send_discord(webhook: str, result: dict):
     name = SYMBOL_DISPLAY.get(result.get("symbol", ""), "")
     mp = result["market_score"]
-    mc = result["macro_score"]
+    v4 = result.get("v4_decision", "WAIT")
+    v4_emoji = DECISION_EMOJI.get(v4, "⚪")
+    v4_label = DECISION_LABEL.get(v4, v4)
     m_emoji = "🟢" if mp > 10 else ("🔴" if mp < -10 else "⚪")
-    mc_emoji = "🟢" if mc > 10 else ("🔴" if mc < -10 else "⚪")
+    band = result.get("band_info")
 
     header = [
-        f"📊 **{name} 市場狀態**",
+        f"{v4_emoji} **{name} — {v4}（{v4_label}）**",
         f"💰 ${result['price']:,.0f}　24h: {result['chg_24h_pct']:+.2f}%",
     ]
+    if result.get("v4_reasons"):
+        for r in result["v4_reasons"]:
+            header.append(f"　• {r}")
 
-    detail = [
-        f"{m_emoji} 行情（衍生品）{mp:+.1f}%",
-    ]
+    detail = []
+    if band:
+        detail.append(f"📊 布林（20,2）寬 {band['width']:.1f}%")
+        detail.append(f"  上 ${band['upper']:,.0f} ｜ 中 ${band['mid']:,.0f} ｜ 下 ${band['lower']:,.0f}")
+        detail.append("")
+    detail.append(f"{m_emoji} 行情（衍生品）{mp:+.1f}%")
     for c in result["market_details"]:
         detail.append(f"  • {c['reason']}")
     detail.append("")
@@ -679,9 +792,9 @@ def append_csv(path: str, result: dict):
     with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new_file:
-            w.writerow(["symbol", "timestamp", "price", "chg_24h_pct", "market_score", "macro_score"])
+            w.writerow(["symbol", "timestamp", "price", "chg_24h_pct", "v4_decision", "market_score", "macro_score"])
         w.writerow([result.get("symbol", ""), result["timestamp"], result["price"], f"{result['chg_24h_pct']:.4f}",
-                    f"{result['market_score']:.1f}", f"{result['macro_score']:.1f}"])
+                    result.get("v4_decision", ""), f"{result['market_score']:.1f}", f"{result['macro_score']:.1f}"])
 
 def sleep_to_next_4h():
     now = datetime.now(timezone.utc)
