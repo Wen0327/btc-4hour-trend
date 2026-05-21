@@ -954,10 +954,8 @@ def main():
         # Backtest reminder (V4 data collection started 2026-05-19, backtest 2026-06-16)
         backtest_date = datetime(2026, 6, 16, tzinfo=timezone.utc)
         days_left = (backtest_date - datetime.now(timezone.utc)).days
-        if 0 <= days_left <= 3:
-            hints.append(f"📋 V4 回測日期在 {days_left} 天後（6/16），準備回測！")
-        elif days_left < 0 and days_left >= -1:
-            hints.append(f"📋 V4 回測日期已到！請執行回測。")
+        if days_left == 0:
+            hints.append("📋 V4 回測日期已到！請執行回測。")
         if hints:
             hint_block = "\n".join(hints)
             if not args.json:
