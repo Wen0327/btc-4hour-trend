@@ -857,13 +857,81 @@ def sleep_to_next_4h():
     print(f"\n等到下個 4h 邊界:{next_dt.strftime('%Y-%m-%d %H:%M UTC')}({secs/3600:.2f}h)")
     time.sleep(max(secs, 1))
 
+HELP_SIGNAL = """
+══════════════════════════════════════════
+  BTC/ETH Signal v4 — 使用說明
+══════════════════════════════════════════
+
+📌 預測模型（V4）
+──────────────────────────────────────
+  主信號：布林通道（20,2）均值回歸
+  • 價格觸及下軌 → 候選 LONG
+  • 價格觸及上軌 → 候選 SHORT
+  • 通道內 → WAIT
+
+  確認指標（至少 1 個才觸發）：
+  • RSI(14) < 30 超賣 / > 70 超買
+  • KD(14,3,3) K < 20 超賣 / > 80 超買
+  • MACD histogram 收斂
+
+  🟢 LONG = 觸下軌 + 至少 1 個確認
+  🔴 SHORT = 觸上軌 + 至少 1 個確認
+  🟡 WAIT = 無觸發或無確認
+
+📊 布林通道
+──────────────────────────────────────
+  上軌/中軌/下軌 + 寬度百分比
+  寬度越窄 = 即將突破，寬度越寬 = 波動大
+
+📈 行情（衍生品）
+──────────────────────────────────────
+  Funding rate — 正=多頭付費（偏空）負=空頭付費（偏多）
+  OI vs 價格  — OI升+價跌=擠空 / OI升+價漲=過熱
+  散戶多空比  — 反向指標（散戶做多→偏空）
+  大戶多空比  — 跟單指標（大戶做多→偏多）
+
+🌍 宏觀
+──────────────────────────────────────
+  EMA50+200 — 強多/弱多/弱空/強空 四級判讀
+  F&G 0-100 — 線性打分（0=極度恐懼偏多，100=極度貪婪偏空）
+  ETF 日流量 — BTC 現貨 ETF 淨流入/流出（僅供參考，有滯後性）
+  Fed 利率   — 當前利率 + FOMC 預期年底升降碼數
+
+🔄 趨勢反轉（有觸發才顯示）
+──────────────────────────────────────
+  • 價格穿越日線 EMA50
+  • EMA20/EMA50 金叉/死叉
+  • RSI 脫離超買/超賣區
+  • MACD histogram 翻轉
+
+⚠️ FOMC/CPI 提示（前後 6h 顯示）
+──────────────────────────────────────
+  公布前後波動劇烈，技術面可能失效
+
+⚙️ 用法
+──────────────────────────────────────
+  python btc_4h_signal.py                # 跑一次
+  python btc_4h_signal.py --json         # JSON 輸出
+  python btc_4h_signal.py --loop         # 每 4h 自動跑
+  python btc_4h_signal.py --log x.csv    # 記錄到 CSV
+  python btc_4h_signal.py --help-signal  # 顯示本說明
+
+⚠️ 這是研究框架，不是已驗證的交易策略。
+══════════════════════════════════════════
+"""
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true", help="JSON 輸出")
     ap.add_argument("--loop", action="store_true", help="持續每 4h 自動跑")
     ap.add_argument("--discord", default=os.environ.get("DISCORD_WEBHOOK"), help="Discord webhook URL (預設讀 .env)")
     ap.add_argument("--log", help="把每次結果 append 到 CSV")
+    ap.add_argument("--help-signal", action="store_true", help="顯示 V4 模型說明")
     args = ap.parse_args()
+
+    if args.help_signal:
+        print(HELP_SIGNAL)
+        return
 
     while True:
         for i, symbol in enumerate(SYMBOLS):
