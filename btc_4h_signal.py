@@ -88,19 +88,69 @@ MACRO_EVENTS_2026 = [
 ]
 MACRO_WINDOW_H = 6  # hours before/after event
 
+def _fred_latest(series_id: str, api_key: str) -> Optional[str]:
+    try:
+        r = requests.get("https://api.stlouisfed.org/fred/series/observations",
+                         params={"series_id": series_id, "api_key": api_key,
+                                 "file_type": "json", "sort_order": "desc", "limit": 1},
+                         timeout=10)
+        r.raise_for_status()
+        obs = r.json().get("observations", [])
+        if obs and obs[0]["value"] != ".":
+            return obs[0]["value"]
+    except Exception:
+        pass
+    return None
+
 def fetch_fed_rate() -> Optional[str]:
     api_key = os.environ.get("FRED_API_KEY")
     if not api_key:
         return None
     try:
-        r = requests.get("https://api.stlouisfed.org/fred/series/observations",
-                         params={"series_id": "EFFR", "api_key": api_key,
-                                 "file_type": "json", "sort_order": "desc", "limit": 1},
-                         timeout=10)
-        r.raise_for_status()
-        obs = r.json().get("observations", [])
-        if obs:
-            return obs[0]["value"]
+        effr = _fred_latest("EFFR", api_key)          # 有效利率
+        upper = _fred_latest("DFEDTARU", api_key)      # 目標上限
+        lower = _fred_latest("DFEDTARL", api_key)      # 目標下限
+        # FOMC dot plot: 抓當年的預測
+        proj = None
+        try:
+            current_year = str(datetime.now(timezone.utc).year)
+            r = requests.get("https://api.stlouisfed.org/fred/series/observations",
+                             params={"series_id": "FEDTARMD", "api_key": api_key,
+                                     "file_type": "json", "sort_order": "desc", "limit": 10},
+                             timeout=10)
+            r.raise_for_status()
+            for obs in r.json().get("observations", []):
+                if obs["date"].startswith(current_year) and obs["value"] != ".":
+                    proj = obs["value"]
+                    break
+        except Exception:
+            pass
+
+        if not effr:
+            return None
+
+        parts = [f"Fed 利率 {effr}%"]
+        if upper and lower:
+            parts[0] = f"Fed 利率 {effr}%（目標 {lower}-{upper}%）"
+
+        if proj and upper:
+            current_mid = (float(upper) + float(lower)) / 2 if lower else float(upper)
+            proj_f = float(proj)
+            diff = current_mid - proj_f
+            cuts = round(diff / 0.25)
+            if cuts > 0:
+                new_upper = float(upper) - cuts * 0.25
+                new_lower = float(lower) - cuts * 0.25 if lower else new_upper - 0.25
+                parts.append(f"FOMC 預期年底降 {cuts} 碼至 {new_lower:.2f}-{new_upper:.2f}%（偏多）")
+            elif cuts < 0:
+                ups = abs(cuts)
+                new_upper = float(upper) + ups * 0.25
+                new_lower = float(lower) + ups * 0.25 if lower else new_upper - 0.25
+                parts.append(f"FOMC 預期年底升 {ups} 碼至 {new_lower:.2f}-{new_upper:.2f}%（偏空）")
+            else:
+                parts.append(f"FOMC 預期年底維持不變（中性）")
+
+        return "｜".join(parts)
     except Exception:
         pass
     return None
