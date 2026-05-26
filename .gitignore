@@ -5,3 +5,6 @@ __pycache__/
 signals.csv
 run.log
 .news_sent.json
+*_history.csv
+*_history.png
+btc_history.csv
