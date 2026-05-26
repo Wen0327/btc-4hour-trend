@@ -692,7 +692,7 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         flow = etf["flow"]
         assets = etf["assets"]
         etf_str = f"ETF {etf['date']} 淨流{'入' if flow > 0 else '出'} ${abs(flow)/1e6:,.0f}M｜總資產 ${assets/1e9:,.1f}B"
-    fed_str = f"Fed 利率 {fed_rate}%" if fed_rate else None
+    fed_str = fed_rate  # fetch_fed_rate() already returns formatted string
 
     result = {
         "symbol": symbol,
