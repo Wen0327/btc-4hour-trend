@@ -67,6 +67,7 @@ VETO_ATR_PCT = 0.005    # 4h ATR < 0.5% of price → too quiet, veto
 
 # Feature toggles
 ENABLE_NEWS = False      # 新聞標題輸出
+SENTIMENT_HOUR = 0       # 每日情緒摘要發送時間（本地時區，0 = UTC 00:05 = 台北 08:05）
 
 # 2026 FOMC statement release times (ET 14:00 → UTC 18:00)
 # 2026 CPI release times (ET 08:30 → UTC 12:30)
@@ -837,6 +838,87 @@ def send_discord(webhook: str, result: dict):
     except Exception as e:
         print(f"Discord send failed: {e}", file=sys.stderr)
 
+def build_daily_sentiment(results: List[dict]) -> str:
+    """根據所有 symbol 的結果產生每日情緒摘要。"""
+    ts = datetime.now(timezone.utc)
+    lines = [
+        f"📋 **每日市場情緒摘要** — {ts.strftime('%Y-%m-%d')}",
+        "",
+    ]
+
+    for r in results:
+        name = SYMBOL_DISPLAY.get(r.get("symbol", ""), "")
+        price = r["price"]
+        chg = r["chg_24h_pct"]
+        mp = r["market_score"]
+        v4 = r.get("v4_decision", "WAIT")
+        band = r.get("band_info")
+
+        # Overall sentiment
+        signals_bull = []
+        signals_bear = []
+        signals_neutral = []
+
+        # V4
+        if v4 == "LONG":
+            signals_bull.append(f"V4 觸發 LONG")
+        elif v4 == "SHORT":
+            signals_bear.append(f"V4 觸發 SHORT")
+
+        # Market score
+        if mp > 10:
+            signals_bull.append(f"行情偏多 {mp:+.1f}%")
+        elif mp < -10:
+            signals_bear.append(f"行情偏空 {mp:+.1f}%")
+        else:
+            signals_neutral.append(f"行情中性 {mp:+.1f}%")
+
+        # Macro details
+        for c in r.get("macro_details", []):
+            if c["score"] > 0.3:
+                signals_bull.append(c["reason"][:40])
+            elif c["score"] < -0.3:
+                signals_bear.append(c["reason"][:40])
+
+        # Reversals
+        for rev in r.get("reversals", []):
+            if "🟢" in rev:
+                signals_bull.append(rev.replace("🟢 ", ""))
+            elif "🔴" in rev:
+                signals_bear.append(rev.replace("🔴 ", ""))
+
+        # ETF
+        if r.get("etf") and "流出" in r["etf"]:
+            signals_bear.append(r["etf"][:40])
+        elif r.get("etf") and "流入" in r["etf"]:
+            signals_bull.append(r["etf"][:40])
+
+        # Determine overall
+        bull_count = len(signals_bull)
+        bear_count = len(signals_bear)
+        if bull_count > bear_count + 1:
+            sentiment = "🟢 偏多"
+        elif bear_count > bull_count + 1:
+            sentiment = "🔴 偏空"
+        else:
+            sentiment = "🟡 中性偏觀望"
+
+        lines.append(f"**{name}** ${price:,.0f}（24h {chg:+.1f}%）→ {sentiment}")
+        if signals_bull:
+            lines.append(f"  多：{' / '.join(signals_bull[:3])}")
+        if signals_bear:
+            lines.append(f"  空：{' / '.join(signals_bear[:3])}")
+        if band:
+            lines.append(f"  布林：{band['pos']}（寬 {band['width']:.1f}%）")
+        lines.append("")
+
+    # Fed rate (from first BTC result)
+    btc_result = next((r for r in results if r.get("symbol") == "BTCUSDT"), None)
+    if btc_result and btc_result.get("fed_rate"):
+        lines.append(f"💵 {btc_result['fed_rate']}")
+
+    return "\n".join(lines)
+
 def append_csv(path: str, result: dict):
     new_file = not os.path.exists(path)
     with open(path, "a", newline="", encoding="utf-8") as f:
@@ -934,11 +1016,13 @@ def main():
         return
 
     while True:
+        all_results = []
         for i, symbol in enumerate(SYMBOLS):
             if i > 0 and not args.json:
                 print("\n")
             try:
                 result = run_once(symbol=symbol, output_json=args.json)
+                all_results.append(result)
                 if args.discord:
                     send_discord(args.discord, result)
                 if args.log:
@@ -946,6 +1030,16 @@ def main():
             except Exception as e:
                 name = SYMBOL_DISPLAY.get(symbol, symbol)
                 print(f"Error ({name}): {e}", file=sys.stderr)
+        # Daily sentiment summary (at SENTIMENT_HOUR local time)
+        now_local = datetime.now()
+        if now_local.hour == SENTIMENT_HOUR and all_results and args.discord:
+            sentiment_msg = build_daily_sentiment(all_results)
+            if not args.json:
+                print(f"\n{sentiment_msg}")
+            try:
+                requests.post(args.discord, json={"content": sentiment_msg}, timeout=10)
+            except Exception:
+                pass
         # Collect all hints
         hints = []
         macro_hint = check_macro_event(datetime.now(timezone.utc))
