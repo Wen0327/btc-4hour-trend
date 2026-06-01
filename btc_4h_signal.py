@@ -630,7 +630,7 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         macro_scored.append((name, s, weight, why))
     macro_pct = calc_category_score(macro_scored)
 
-    # V4 Prediction: Bollinger + confirmations
+    # V4 Prediction: Bollinger + confirmations + trend filter
     closes_4h = [k["close"] for k in klines]
     mid, upper, lower = bollinger(closes_4h, 20, 2)
     v4_decision = "WAIT"
@@ -639,6 +639,19 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         prev_price = klines[-2]["close"]
         touch_lower = prev_price >= lower and price < lower
         touch_upper = prev_price <= upper and price > upper
+
+        # Trend direction (EMA20/50)
+        ema20_4h = ema(closes_4h, 20)
+        ema50_4h = ema(closes_4h, 50)
+        if ema20_4h and ema50_4h:
+            if price > ema20_4h and ema20_4h > ema50_4h:
+                trend_dir = "up"
+            elif price < ema20_4h and ema20_4h < ema50_4h:
+                trend_dir = "down"
+            else:
+                trend_dir = "neutral"
+        else:
+            trend_dir = "neutral"
 
         if touch_lower or touch_upper:
             # Check confirmations
@@ -651,25 +664,33 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
 
             confirms = []
             if touch_lower:
-                v4_reasons.append(f"價格觸及布林下軌 ${lower:,.0f}")
-                if rsi_now and rsi_now < 30:
-                    confirms.append(f"RSI {rsi_now:.0f} 超賣")
-                if kd_k and kd_k < 20:
-                    confirms.append(f"K {kd_k:.0f} 超賣")
-                if hist_now and hist_prev and hist_now < 0 and hist_now > hist_prev:
-                    confirms.append("MACD 空頭收斂")
-                if len(confirms) >= 1:
-                    v4_decision = "LONG"
+                # Trend filter: don't LONG in downtrend
+                if trend_dir == "down":
+                    v4_reasons.append(f"價格觸及布林下軌 ${lower:,.0f}，但處於下跌趨勢，過濾掉")
+                else:
+                    v4_reasons.append(f"價格觸及布林下軌 ${lower:,.0f}")
+                    if rsi_now and rsi_now < 30:
+                        confirms.append(f"RSI {rsi_now:.0f} 超賣")
+                    if kd_k and kd_k < 20:
+                        confirms.append(f"K {kd_k:.0f} 超賣")
+                    if hist_now and hist_prev and hist_now < 0 and hist_now > hist_prev:
+                        confirms.append("MACD 空頭收斂")
+                    if len(confirms) >= 1:
+                        v4_decision = "LONG"
             elif touch_upper:
-                v4_reasons.append(f"價格觸及布林上軌 ${upper:,.0f}")
-                if rsi_now and rsi_now > 70:
-                    confirms.append(f"RSI {rsi_now:.0f} 超買")
-                if kd_k and kd_k > 80:
-                    confirms.append(f"K {kd_k:.0f} 超買")
-                if hist_now and hist_prev and hist_now > 0 and hist_now < hist_prev:
-                    confirms.append("MACD 多頭收斂")
-                if len(confirms) >= 1:
-                    v4_decision = "SHORT"
+                # Trend filter: don't SHORT in uptrend
+                if trend_dir == "up":
+                    v4_reasons.append(f"價格觸及布林上軌 ${upper:,.0f}，但處於上升趨勢，過濾掉")
+                else:
+                    v4_reasons.append(f"價格觸及布林上軌 ${upper:,.0f}")
+                    if rsi_now and rsi_now > 70:
+                        confirms.append(f"RSI {rsi_now:.0f} 超買")
+                    if kd_k and kd_k > 80:
+                        confirms.append(f"K {kd_k:.0f} 超買")
+                    if hist_now and hist_prev and hist_now > 0 and hist_now < hist_prev:
+                        confirms.append("MACD 多頭收斂")
+                    if len(confirms) >= 1:
+                        v4_decision = "SHORT"
 
             if confirms:
                 v4_reasons.extend(confirms)
