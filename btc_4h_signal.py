@@ -319,6 +319,66 @@ def bollinger(closes: List[float], period: int = 20, std_mult: float = 2):
     std = variance ** 0.5
     return sma, sma + std_mult * std, sma - std_mult * std
 
+def ichimoku(klines: List[dict], tenkan: int = 9, kijun: int = 26, senkou_b: int = 52) -> Optional[Dict]:
+    if len(klines) < senkou_b + kijun:
+        return None
+    def mid(data, period, idx):
+        window = data[max(0, idx-period+1):idx+1]
+        return (max(k["high"] for k in window) + min(k["low"] for k in window)) / 2
+    i = len(klines) - 1
+    tenkan_sen = mid(klines, tenkan, i)
+    kijun_sen = mid(klines, kijun, i)
+    senkou_a = (tenkan_sen + kijun_sen) / 2
+    senkou_b_val = mid(klines, senkou_b, i)
+    cloud_top = max(senkou_a, senkou_b_val)
+    cloud_bottom = min(senkou_a, senkou_b_val)
+    chikou = klines[i]["close"]
+    chikou_ref = klines[i - kijun]["close"] if i >= kijun else None
+    return {
+        "tenkan": tenkan_sen, "kijun": kijun_sen,
+        "senkou_a": senkou_a, "senkou_b": senkou_b_val,
+        "cloud_top": cloud_top, "cloud_bottom": cloud_bottom,
+        "chikou": chikou, "chikou_ref": chikou_ref,
+    }
+
+def find_swing(klines: List[dict], lookback: int = 60) -> Tuple[float, float]:
+    recent = klines[-lookback:]
+    return max(k["high"] for k in recent), min(k["low"] for k in recent)
+
+def calc_obv(klines: List[dict]) -> List[float]:
+    obv = [0.0]
+    for i in range(1, len(klines)):
+        if klines[i]["close"] > klines[i-1]["close"]:
+            obv.append(obv[-1] + klines[i]["volume"])
+        elif klines[i]["close"] < klines[i-1]["close"]:
+            obv.append(obv[-1] - klines[i]["volume"])
+        else:
+            obv.append(obv[-1])
+    return obv
+
+def calc_adx(klines: List[dict], period: int = 14) -> Optional[Dict]:
+    if len(klines) < period * 2 + 1:
+        return None
+    tr_list, plus_dm, minus_dm = [], [], []
+    for i in range(1, len(klines)):
+        h, l, pc = klines[i]["high"], klines[i]["low"], klines[i-1]["close"]
+        tr_list.append(max(h-l, abs(h-pc), abs(l-pc)))
+        up = h - klines[i-1]["high"]
+        down = klines[i-1]["low"] - l
+        plus_dm.append(up if up > down and up > 0 else 0)
+        minus_dm.append(down if down > up and down > 0 else 0)
+    atr_s = sum(tr_list[:period]) / period
+    plus_s = sum(plus_dm[:period]) / period
+    minus_s = sum(minus_dm[:period]) / period
+    for i in range(period, len(tr_list)):
+        atr_s = (atr_s * (period-1) + tr_list[i]) / period
+        plus_s = (plus_s * (period-1) + plus_dm[i]) / period
+        minus_s = (minus_s * (period-1) + minus_dm[i]) / period
+    plus_di = (plus_s / atr_s * 100) if atr_s else 0
+    minus_di = (minus_s / atr_s * 100) if atr_s else 0
+    dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) else 0
+    return {"adx": dx, "plus_di": plus_di, "minus_di": minus_di}
+
 def calc_kd(klines: List[dict], period: int = 14, smooth_k: int = 3, smooth_d: int = 3):
     if len(klines) < period + smooth_k + smooth_d:
         return None, None
@@ -630,79 +690,86 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         macro_scored.append((name, s, weight, why))
     macro_pct = calc_category_score(macro_scored)
 
-    # V4 Prediction: Bollinger + confirmations + trend filter
+    # V5 Prediction: Ichimoku + Fibonacci + OBV
     closes_4h = [k["close"] for k in klines]
-    mid, upper, lower = bollinger(closes_4h, 20, 2)
     v4_decision = "WAIT"
     v4_reasons = []
-    if mid and len(klines) >= 2:
-        prev_price = klines[-2]["close"]
-        touch_lower = prev_price >= lower and price < lower
-        touch_upper = prev_price <= upper and price > upper
 
-        # Trend direction (EMA20/50)
-        ema20_4h = ema(closes_4h, 20)
-        ema50_4h = ema(closes_4h, 50)
-        if ema20_4h and ema50_4h:
-            if price > ema20_4h and ema20_4h > ema50_4h:
-                trend_dir = "up"
-            elif price < ema20_4h and ema20_4h < ema50_4h:
-                trend_dir = "down"
-            else:
-                trend_dir = "neutral"
+    ichi = ichimoku(klines)
+    adx_data = calc_adx(klines, 14)
+    mid, upper, lower = bollinger(closes_4h, 20, 2)
+
+    if ichi:
+        # Ichimoku scoring (max ±4)
+        ichi_score = 0
+        if price > ichi["cloud_top"]:
+            ichi_score += 2
+            v4_reasons.append(f"一目均衡：雲上（多）")
+        elif price < ichi["cloud_bottom"]:
+            ichi_score -= 2
+            v4_reasons.append(f"一目均衡：雲下（空）")
         else:
-            trend_dir = "neutral"
+            v4_reasons.append(f"一目均衡：雲中（觀望）")
+        if ichi["tenkan"] > ichi["kijun"]:
+            ichi_score += 1
+        elif ichi["tenkan"] < ichi["kijun"]:
+            ichi_score -= 1
+        if ichi["chikou_ref"]:
+            if ichi["chikou"] > ichi["chikou_ref"]:
+                ichi_score += 1
+            elif ichi["chikou"] < ichi["chikou_ref"]:
+                ichi_score -= 1
 
-        if touch_lower or touch_upper:
-            # Check confirmations
-            rsi_vals = calc_rsi(closes_4h, 14)
-            rsi_now = rsi_vals[-1] if rsi_vals and rsi_vals[-1] is not None else None
-            kd_k, kd_d = calc_kd(klines, 14, 3, 3)
-            _, _, m_hist = calc_macd(closes_4h)
-            hist_now = m_hist[-1] if m_hist and len(m_hist) >= 1 else None
-            hist_prev = m_hist[-2] if m_hist and len(m_hist) >= 2 else None
+        # Fibonacci scoring (±1)
+        swing_h, swing_l = find_swing(klines, 60)
+        fib_rng = swing_h - swing_l
+        fib_score = 0
+        if fib_rng > 0:
+            fib_ratio = (price - swing_l) / fib_rng
+            if fib_ratio < 0.236:
+                fib_score = 1
+                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（極低位）")
+            elif fib_ratio < 0.382:
+                fib_score = 0.5
+                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（低位）")
+            elif fib_ratio > 0.786:
+                fib_score = -1
+                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（極高位）")
+            elif fib_ratio > 0.618:
+                fib_score = -0.5
+                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（高位）")
 
-            confirms = []
-            if touch_lower:
-                # Trend filter: don't LONG in downtrend
-                if trend_dir == "down":
-                    v4_reasons.append(f"價格觸及布林下軌 ${lower:,.0f}，但處於下跌趨勢，過濾掉")
-                else:
-                    v4_reasons.append(f"價格觸及布林下軌 ${lower:,.0f}")
-                    if rsi_now and rsi_now < 30:
-                        confirms.append(f"RSI {rsi_now:.0f} 超賣")
-                    if kd_k and kd_k < 20:
-                        confirms.append(f"K {kd_k:.0f} 超賣")
-                    if hist_now and hist_prev and hist_now < 0 and hist_now > hist_prev:
-                        confirms.append("MACD 空頭收斂")
-                    if len(confirms) >= 1:
-                        v4_decision = "LONG"
-            elif touch_upper:
-                # Trend filter: don't SHORT in uptrend
-                if trend_dir == "up":
-                    v4_reasons.append(f"價格觸及布林上軌 ${upper:,.0f}，但處於上升趨勢，過濾掉")
-                else:
-                    v4_reasons.append(f"價格觸及布林上軌 ${upper:,.0f}")
-                    if rsi_now and rsi_now > 70:
-                        confirms.append(f"RSI {rsi_now:.0f} 超買")
-                    if kd_k and kd_k > 80:
-                        confirms.append(f"K {kd_k:.0f} 超買")
-                    if hist_now and hist_prev and hist_now > 0 and hist_now < hist_prev:
-                        confirms.append("MACD 多頭收斂")
-                    if len(confirms) >= 1:
-                        v4_decision = "SHORT"
+        # OBV scoring (±1)
+        obv_vals = calc_obv(klines)
+        obv_score = 0
+        if len(obv_vals) > 10:
+            price_chg = klines[-1]["close"] - klines[-10]["close"]
+            obv_chg = obv_vals[-1] - obv_vals[-10]
+            if price_chg < 0 and obv_chg > 0:
+                obv_score = 1
+                v4_reasons.append("OBV 多頭背離（價跌量增）")
+            elif price_chg > 0 and obv_chg < 0:
+                obv_score = -1
+                v4_reasons.append("OBV 空頭背離（價漲量縮）")
 
-            if confirms:
-                v4_reasons.extend(confirms)
+        # Combined: max ±6, threshold ±3
+        total_v5 = ichi_score + fib_score + obv_score
+        if total_v5 >= 3:
+            v4_decision = "LONG"
+        elif total_v5 <= -3:
+            v4_decision = "SHORT"
 
-    # Band info for display
+    # Technical info for display
     band_info = None
     if mid:
         band_width = (upper - lower) / mid * 100
+        adx_val = adx_data["adx"] if adx_data else 0
+        regime = "趨勢" if adx_val > 25 else "盤整"
         band_info = {
             "mid": mid, "upper": upper, "lower": lower,
             "width": band_width,
             "pos": "上軌上方" if price > upper else ("下軌下方" if price < lower else "通道內"),
+            "adx": adx_val, "regime": regime,
         }
 
     # Trend reversals
@@ -766,9 +833,9 @@ def print_dashboard(name, ts, price, chg_24h, v4_decision, v4_reasons, band_info
         print(f"     • 布林通道{band_info['pos']}，無觸發信號")
     print(f"  {div}\n")
 
-    # Bollinger info
+    # Technical info
     if band_info:
-        print(f"  📊 布林通道（20,2）寬度 {band_info['width']:.1f}%")
+        print(f"  📊 ADX {band_info['adx']:.0f}（{band_info['regime']}）｜布林寬 {band_info['width']:.1f}%")
         print(f"     上軌 ${band_info['upper']:,.0f} ｜ 中軌 ${band_info['mid']:,.0f} ｜ 下軌 ${band_info['lower']:,.0f}")
         print()
 
