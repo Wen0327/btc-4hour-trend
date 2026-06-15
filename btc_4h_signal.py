@@ -1134,10 +1134,7 @@ def main():
         if macro_hint:
             hints.append(macro_hint)
         # Backtest reminder (V4 data collection started 2026-05-19, backtest 2026-06-16)
-        backtest_date = datetime(2026, 7, 13, tzinfo=timezone.utc)
-        days_left = (backtest_date - datetime.now(timezone.utc)).days
-        if days_left == 0:
-            hints.append("📋 V5 回測日期已到！請執行回測。")
+        # V5 backtest reminder disabled — already backtested with historical data
         if hints:
             hint_block = "\n".join(hints)
             if not args.json:
