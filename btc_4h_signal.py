@@ -724,17 +724,18 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         swing_h, swing_l = find_swing(klines, 60)
         fib_rng = swing_h - swing_l
         fib_score = 0
+        fib_ratio = None
         if fib_rng > 0:
             fib_ratio = (price - swing_l) / fib_rng
             if fib_ratio < 0.236:
                 fib_score = 1
-                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（極低位）")
+                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（極低位，支撐附近）")
             elif fib_ratio < 0.382:
                 fib_score = 0.5
                 v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（低位）")
             elif fib_ratio > 0.786:
                 fib_score = -1
-                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（極高位）")
+                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（極高位，壓力附近）")
             elif fib_ratio > 0.618:
                 fib_score = -0.5
                 v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（高位）")
@@ -758,6 +759,13 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
             v4_decision = "LONG"
         elif total_v5 <= -3:
             v4_decision = "SHORT"
+
+        # Fibonacci contradiction warning
+        if fib_ratio is not None:
+            if v4_decision == "LONG" and fib_ratio > 0.786:
+                v4_reasons.append(f"⚠️ 注意：斐波那契 {fib_ratio:.0%} 接近高位，回落風險")
+            elif v4_decision == "SHORT" and fib_ratio < 0.236:
+                v4_reasons.append(f"⚠️ 注意：斐波那契 {fib_ratio:.0%} 接近低位，反彈風險")
 
     # Technical info for display
     band_info = None
