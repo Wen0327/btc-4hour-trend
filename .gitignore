@@ -8,3 +8,6 @@ run.log
 *_history.csv
 *_history.png
 btc_history.csv
+spcx_update.log
+spcx_intraday.csv
+backtest_v5.log
