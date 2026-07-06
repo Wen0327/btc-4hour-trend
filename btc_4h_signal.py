@@ -721,7 +721,7 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
                 ichi_score -= 1
 
         # Fibonacci scoring (±1)
-        swing_h, swing_l = find_swing(klines, 60)
+        swing_h, swing_l = find_swing(daily, 90)
         fib_rng = swing_h - swing_l
         fib_score = 0
         fib_ratio = None
@@ -778,7 +778,7 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         levels = []
 
         # Fibonacci levels from swing
-        swing_h, swing_l = find_swing(klines, 60)
+        swing_h, swing_l = find_swing(daily, 90)
         fib_rng = swing_h - swing_l
         if fib_rng > 0:
             for name, ratio in [("Fib 23.6%", 0.236), ("Fib 38.2%", 0.382),
