@@ -767,6 +767,113 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
             elif v4_decision == "SHORT" and fib_ratio < 0.236:
                 v4_reasons.append(f"⚠️ 注意：斐波那契 {fib_ratio:.0%} 接近低位，反彈風險")
 
+    # Target levels (multi-confluence)
+    targets = []
+    if v4_decision in ("LONG", "SHORT") and len(daily) >= 201:
+        daily_closes = [k["close"] for k in daily]
+        daily_ema50 = ema(daily_closes, 50)
+        daily_ema200 = ema(daily_closes, 200)
+
+        # Collect all key levels
+        levels = []
+
+        # Fibonacci levels from swing
+        swing_h, swing_l = find_swing(klines, 60)
+        fib_rng = swing_h - swing_l
+        if fib_rng > 0:
+            for name, ratio in [("Fib 23.6%", 0.236), ("Fib 38.2%", 0.382),
+                                ("Fib 50%", 0.5), ("Fib 61.8%", 0.618), ("Fib 78.6%", 0.786)]:
+                levels.append((swing_l + fib_rng * ratio, name))
+
+        # Daily swing highs/lows (recent 60 days)
+        for i in range(5, min(len(daily)-5, 60)):
+            low_val = daily[-(i+1)]["low"]
+            high_val = daily[-(i+1)]["high"]
+            window_before = daily[-(i+4):-(i+1)]
+            window_after = daily[-i:max(-i+3, 0)] if i >= 3 else daily[-i:]
+            if window_before and window_after:
+                if low_val <= min(k["low"] for k in window_before) and low_val <= min(k["low"] for k in window_after):
+                    levels.append((low_val, "前低"))
+                if high_val >= max(k["high"] for k in window_before) and high_val >= max(k["high"] for k in window_after):
+                    levels.append((high_val, "前高"))
+
+        # EMAs
+        if daily_ema50:
+            levels.append((daily_ema50, "EMA50"))
+        if daily_ema200:
+            levels.append((daily_ema200, "EMA200"))
+
+        # Bollinger bands
+        if mid:
+            levels.append((upper, "布林上軌"))
+            levels.append((lower, "布林下軌"))
+
+        # Ichimoku cloud
+        if ichi:
+            levels.append((ichi["cloud_top"], "雲頂"))
+            levels.append((ichi["cloud_bottom"], "雲底"))
+            levels.append((ichi["kijun"], "基準線"))
+
+        # Group nearby levels (within 1.5%) into clusters
+        levels.sort(key=lambda x: x[0])
+        clusters = []
+        used = set()
+        for i, (lv, nm) in enumerate(levels):
+            if i in used:
+                continue
+            cluster_levels = [(lv, nm)]
+            used.add(i)
+            for j in range(i+1, len(levels)):
+                if j in used:
+                    continue
+                if abs(levels[j][0] - lv) / lv < 0.015:  # within 1.5%
+                    cluster_levels.append(levels[j])
+                    used.add(j)
+            avg_price = sum(p for p, _ in cluster_levels) / len(cluster_levels)
+            names = [n for _, n in cluster_levels]
+            strength = len(cluster_levels)
+            clusters.append({"price": avg_price, "names": names, "strength": strength})
+
+        # Pick targets based on direction
+        if v4_decision == "LONG":
+            # TPs: clusters above current price, sorted by distance
+            tps = sorted([c for c in clusters if c["price"] > price * 1.005],
+                         key=lambda c: c["price"])
+            # SL: strongest cluster below current price, or lowest recent swing
+            sls = sorted([c for c in clusters if c["price"] < price * 0.995],
+                         key=lambda c: c["price"])
+            if tps:
+                for i, tp in enumerate(tps[:3]):
+                    pct = (tp["price"] / price - 1) * 100
+                    alloc = [30, 30, 40][i] if len(tps) >= 3 else ([50, 50][i] if len(tps) >= 2 else [100][0])
+                    confluence = "★" * min(tp["strength"], 3)
+                    targets.append(f"TP{i+1}: ${tp['price']:,.0f}（{'+'.join(tp['names'][:3])}）{confluence} → 減倉 {alloc}%（{pct:+.1f}%）")
+            if sls:
+                sl = sls[0]
+                sl_price = sl["price"] * 0.98  # 2% below support
+                sl_pct = (sl_price / price - 1) * 100
+                targets.append(f"SL:  ${sl_price:,.0f}（{'+'.join(sl['names'][:2])} 下方 2%）→ 停損（{sl_pct:+.1f}%）")
+        elif v4_decision == "SHORT":
+            # TPs: clusters below current price
+            tps = sorted([c for c in clusters if c["price"] < price * 0.995],
+                         key=lambda c: c["price"], reverse=True)
+            # SL: strongest cluster above current price
+            sls = sorted([c for c in clusters if c["price"] > price * 1.005],
+                         key=lambda c: c["price"])
+            if tps:
+                for i, tp in enumerate(tps[:3]):
+                    pct = (tp["price"] / price - 1) * 100
+                    alloc = [30, 30, 40][i] if len(tps) >= 3 else ([50, 50][i] if len(tps) >= 2 else [100][0])
+                    confluence = "★" * min(tp["strength"], 3)
+                    targets.append(f"TP{i+1}: ${tp['price']:,.0f}（{'+'.join(tp['names'][:3])}）{confluence} → 減倉 {alloc}%（{pct:+.1f}%）")
+            if sls:
+                sl = sls[0]
+                sl_price = sl["price"] * 1.02  # 2% above resistance
+                sl_pct = (sl_price / price - 1) * 100
+                targets.append(f"SL:  ${sl_price:,.0f}（{'+'.join(sl['names'][:2])} 上方 2%）→ 停損（{sl_pct:+.1f}%）")
+
+    result_targets = targets
+
     # Technical info for display
     band_info = None
     if mid:
@@ -804,13 +911,14 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         "market_details": [{"name": n, "score": s, "weight": w, "reason": why} for n, s, w, why in market_scored],
         "macro_details": [{"name": n, "score": s, "weight": w, "reason": why} for n, s, w, why in macro_scored],
         "reversals": reversals,
+        "targets": result_targets,
         "etf": etf_str,
         "fed_rate": fed_str,
     }
 
     if not output_json:
         print_dashboard(sym_name, ts, price, chg_24h, v4_decision, v4_reasons, band_info,
-                        market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals, fed_str)
+                        market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals, fed_str, result_targets)
     else:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -820,7 +928,7 @@ DECISION_LABEL = {"LONG": "做多", "SHORT": "做空", "WAIT": "觀望"}
 DECISION_EMOJI = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "🟡"}
 
 def print_dashboard(name, ts, price, chg_24h, v4_decision, v4_reasons, band_info,
-                    market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals, fed_str=None):
+                    market_pct, market_scored, macro_pct, macro_scored, etf_str, reversals, fed_str=None, targets=None):
     bar = "═" * 40
     div = "─" * 38
 
@@ -840,6 +948,15 @@ def print_dashboard(name, ts, price, chg_24h, v4_decision, v4_reasons, band_info
     elif band_info:
         print(f"     • 布林通道{band_info['pos']}，無觸發信號")
     print(f"  {div}\n")
+
+    # Target levels
+    if targets:
+        print(f"  {div}")
+        print(f"  📍 目標價位")
+        print(f"  {div}")
+        for t in targets:
+            print(f"     {t}")
+        print()
 
     # Technical info
     if band_info:
@@ -919,6 +1036,14 @@ def send_discord(webhook: str, result: dict):
         detail.append(f"  • {result['fed_rate']}")
 
     lines = header + ["```"] + detail + ["```"]
+
+    # Targets
+    if result.get("targets"):
+        lines.append("📍 **目標價位**")
+        lines.append("```")
+        for t in result["targets"]:
+            lines.append(t)
+        lines.append("```")
 
     # Reversals
     if result.get("reversals"):
