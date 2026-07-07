@@ -787,6 +787,18 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
             elif v4_decision == "SHORT" and fib_ratio < 0.236:
                 v4_reasons.append(f"⚠️ 注意：斐波那契 {fib_ratio:.0%} 接近低位，反彈風險")
 
+        # Cross-timeframe check: 4h 信號 vs 日線結構
+        if v4_decision in ("LONG", "SHORT") and len(daily) >= 201:
+            d_closes = [k["close"] for k in daily]
+            d_ema50 = ema(d_closes, 50)
+            d_ema200 = ema(d_closes, 200)
+            if d_ema50 and d_ema200:
+                d_price = d_closes[-1]
+                if v4_decision == "LONG" and d_price < d_ema50 and d_ema50 < d_ema200:
+                    v4_reasons.append("⚠️ 日線結構仍為強空（價<EMA50<EMA200）— 此為逆勢反彈單，建議縮小倉位")
+                elif v4_decision == "SHORT" and d_price > d_ema50 and d_ema50 > d_ema200:
+                    v4_reasons.append("⚠️ 日線結構仍為強多（價>EMA50>EMA200）— 此為逆勢回調單，建議縮小倉位")
+
     # Target levels (multi-confluence)
     targets = []
     if v4_decision in ("LONG", "SHORT") and len(daily) >= 201:
@@ -806,33 +818,25 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
                 levels.append((swing_l + fib_rng * ratio, name))
 
         # Daily swing highs/lows (recent 60 days)
-        for i in range(5, min(len(daily)-5, 60)):
-            low_val = daily[-(i+1)]["low"]
-            high_val = daily[-(i+1)]["high"]
-            window_before = daily[-(i+4):-(i+1)]
-            window_after = daily[-i:max(-i+3, 0)] if i >= 3 else daily[-i:]
-            if window_before and window_after:
-                if low_val <= min(k["low"] for k in window_before) and low_val <= min(k["low"] for k in window_after):
+        n_daily = len(daily)
+        for idx in range(max(3, n_daily - 60), n_daily - 3):
+            low_val = daily[idx]["low"]
+            high_val = daily[idx]["high"]
+            before = daily[idx-3:idx]
+            after = daily[idx+1:idx+4]
+            if before and after:
+                if low_val <= min(k["low"] for k in before) and low_val <= min(k["low"] for k in after):
                     levels.append((low_val, "前低"))
-                if high_val >= max(k["high"] for k in window_before) and high_val >= max(k["high"] for k in window_after):
+                if high_val >= max(k["high"] for k in before) and high_val >= max(k["high"] for k in after):
                     levels.append((high_val, "前高"))
 
-        # EMAs
+        # Daily EMAs
         if daily_ema50:
             levels.append((daily_ema50, "EMA50"))
         if daily_ema200:
             levels.append((daily_ema200, "EMA200"))
-
-        # Bollinger bands
-        if mid:
-            levels.append((upper, "布林上軌"))
-            levels.append((lower, "布林下軌"))
-
-        # Ichimoku cloud
-        if ichi:
-            levels.append((ichi["cloud_top"], "雲頂"))
-            levels.append((ichi["cloud_bottom"], "雲底"))
-            levels.append((ichi["kijun"], "基準線"))
+        # 注意：4h 級別的布林軌道和 4h Ichimoku 雲不放進日線目標價位，
+        # 距離太近沒有減倉意義
 
         # Group nearby levels (within 1.5%) into clusters
         levels.sort(key=lambda x: x[0])
@@ -850,14 +854,15 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
                     cluster_levels.append(levels[j])
                     used.add(j)
             avg_price = sum(p for p, _ in cluster_levels) / len(cluster_levels)
-            names = [n for _, n in cluster_levels]
+            names = list(dict.fromkeys(n for _, n in cluster_levels))  # dedupe, keep order
             strength = len(cluster_levels)
             clusters.append({"price": avg_price, "names": names, "strength": strength})
 
-        # Pick targets based on direction
+        # Pick targets based on direction (TP 至少距現價 2%)
+        MIN_TP_DIST = 0.02
         if v4_decision == "LONG":
             # TPs: clusters above current price, sorted by distance
-            tps = sorted([c for c in clusters if c["price"] > price * 1.005],
+            tps = sorted([c for c in clusters if c["price"] > price * (1 + MIN_TP_DIST)],
                          key=lambda c: c["price"])
             # SL: strongest cluster below current price, or lowest recent swing
             sls = sorted([c for c in clusters if c["price"] < price * 0.995],
@@ -875,7 +880,7 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
                 targets.append(f"SL:  ${sl_price:,.0f}（{'+'.join(sl['names'][:2])} 下方 2%）→ 停損（{sl_pct:+.1f}%）")
         elif v4_decision == "SHORT":
             # TPs: clusters below current price
-            tps = sorted([c for c in clusters if c["price"] < price * 0.995],
+            tps = sorted([c for c in clusters if c["price"] < price * (1 - MIN_TP_DIST)],
                          key=lambda c: c["price"], reverse=True)
             # SL: strongest cluster above current price
             sls = sorted([c for c in clusters if c["price"] > price * 1.005],
