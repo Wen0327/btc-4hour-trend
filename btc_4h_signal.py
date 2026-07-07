@@ -320,16 +320,20 @@ def bollinger(closes: List[float], period: int = 20, std_mult: float = 2):
     return sma, sma + std_mult * std, sma - std_mult * std
 
 def ichimoku(klines: List[dict], tenkan: int = 9, kijun: int = 26, senkou_b: int = 52) -> Optional[Dict]:
+    """標準 Ichimoku：雲（先行帶）由 kijun 根之前的資料計算（前移效果）。"""
     if len(klines) < senkou_b + kijun:
         return None
     def mid(data, period, idx):
         window = data[max(0, idx-period+1):idx+1]
         return (max(k["high"] for k in window) + min(k["low"] for k in window)) / 2
     i = len(klines) - 1
+    # 轉換線 / 基準線：用當下資料
     tenkan_sen = mid(klines, tenkan, i)
     kijun_sen = mid(klines, kijun, i)
-    senkou_a = (tenkan_sen + kijun_sen) / 2
-    senkou_b_val = mid(klines, senkou_b, i)
+    # 雲：標準定義是往前推 kijun 根，所以「現在」的雲是 kijun 根之前算的
+    j = i - kijun
+    senkou_a = (mid(klines, tenkan, j) + mid(klines, kijun, j)) / 2
+    senkou_b_val = mid(klines, senkou_b, j)
     cloud_top = max(senkou_a, senkou_b_val)
     cloud_bottom = min(senkou_a, senkou_b_val)
     chikou = klines[i]["close"]
@@ -357,7 +361,8 @@ def calc_obv(klines: List[dict]) -> List[float]:
     return obv
 
 def calc_adx(klines: List[dict], period: int = 14) -> Optional[Dict]:
-    if len(klines) < period * 2 + 1:
+    """真正的 ADX：DX 序列再做 Wilder 平滑，不是單根 DX。"""
+    if len(klines) < period * 3:
         return None
     tr_list, plus_dm, minus_dm = [], [], []
     for i in range(1, len(klines)):
@@ -367,17 +372,32 @@ def calc_adx(klines: List[dict], period: int = 14) -> Optional[Dict]:
         down = klines[i-1]["low"] - l
         plus_dm.append(up if up > down and up > 0 else 0)
         minus_dm.append(down if down > up and down > 0 else 0)
+
+    def dx_of(p, m):
+        return abs(p - m) / (p + m) * 100 if (p + m) else 0
+
     atr_s = sum(tr_list[:period]) / period
     plus_s = sum(plus_dm[:period]) / period
     minus_s = sum(minus_dm[:period]) / period
+    plus_di = plus_s / atr_s * 100 if atr_s else 0
+    minus_di = minus_s / atr_s * 100 if atr_s else 0
+    dx_list = [dx_of(plus_di, minus_di)]
+
     for i in range(period, len(tr_list)):
         atr_s = (atr_s * (period-1) + tr_list[i]) / period
         plus_s = (plus_s * (period-1) + plus_dm[i]) / period
         minus_s = (minus_s * (period-1) + minus_dm[i]) / period
-    plus_di = (plus_s / atr_s * 100) if atr_s else 0
-    minus_di = (minus_s / atr_s * 100) if atr_s else 0
-    dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100 if (plus_di + minus_di) else 0
-    return {"adx": dx, "plus_di": plus_di, "minus_di": minus_di}
+        plus_di = plus_s / atr_s * 100 if atr_s else 0
+        minus_di = minus_s / atr_s * 100 if atr_s else 0
+        dx_list.append(dx_of(plus_di, minus_di))
+
+    if len(dx_list) < period:
+        return None
+    adx = sum(dx_list[:period]) / period
+    for i in range(period, len(dx_list)):
+        adx = (adx * (period-1) + dx_list[i]) / period
+
+    return {"adx": adx, "plus_di": plus_di, "minus_di": minus_di}
 
 def calc_kd(klines: List[dict], period: int = 14, smooth_k: int = 3, smooth_d: int = 3):
     if len(klines) < period + smooth_k + smooth_d:
