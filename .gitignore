@@ -11,3 +11,4 @@ btc_history.csv
 spcx_update.log
 spcx_intraday.csv
 backtest_v5.log
+.v6_state.json

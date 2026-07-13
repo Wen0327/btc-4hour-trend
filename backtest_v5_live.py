@@ -87,7 +87,7 @@ def run_backtest():
 
     # Build report
     lines = []
-    lines.append("📋 **V5 模型 Live 回測報告**")
+    lines.append("📋 **V6 模型 Live 回測報告**")
     lines.append(f"期間: {signals[0]['timestamp'].strftime('%Y-%m-%d')} ~ {signals[-1]['timestamp'].strftime('%Y-%m-%d')}")
     lines.append("")
 

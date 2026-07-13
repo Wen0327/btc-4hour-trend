@@ -167,6 +167,22 @@ def check_macro_event(ts: datetime) -> Optional[str]:
     return None
 
 NEWS_SENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".news_sent.json")
+V6_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".v6_state.json")
+V6_COOLDOWN_H = 24  # 信號冷卻時間（小時），避免同一判斷重複出信號
+
+def _load_v6_state() -> dict:
+    try:
+        with open(V6_STATE_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_v6_state(state: dict):
+    try:
+        with open(V6_STATE_PATH, "w") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
 
 def _load_sent_ids() -> set:
     try:
@@ -710,78 +726,64 @@ def run_once(symbol: str = "BTCUSDT", output_json: bool = False):
         macro_scored.append((name, s, weight, why))
     macro_pct = calc_category_score(macro_scored)
 
-    # V5 Prediction: Ichimoku + Fibonacci + OBV
+    # V6 Prediction: 順勢回撤（pullback-in-trend）
+    # 跌勢中等反彈到 EMA20 做空、漲勢中等回撤到 EMA20 做多，24h 冷卻
     closes_4h = [k["close"] for k in klines]
     v4_decision = "WAIT"
     v4_reasons = []
 
-    ichi = ichimoku(klines)
     adx_data = calc_adx(klines, 14)
     mid, upper, lower = bollinger(closes_4h, 20, 2)
 
-    if ichi:
-        # Ichimoku scoring (max ±4)
-        ichi_score = 0
-        if price > ichi["cloud_top"]:
-            ichi_score += 2
-            v4_reasons.append(f"一目均衡：雲上（多）")
-        elif price < ichi["cloud_bottom"]:
-            ichi_score -= 2
-            v4_reasons.append(f"一目均衡：雲下（空）")
-        else:
-            v4_reasons.append(f"一目均衡：雲中（觀望）")
-        if ichi["tenkan"] > ichi["kijun"]:
-            ichi_score += 1
-        elif ichi["tenkan"] < ichi["kijun"]:
-            ichi_score -= 1
-        if ichi["chikou_ref"]:
-            if ichi["chikou"] > ichi["chikou_ref"]:
-                ichi_score += 1
-            elif ichi["chikou"] < ichi["chikou_ref"]:
-                ichi_score -= 1
+    e20 = ema(closes_4h, 20)
+    e50 = ema(closes_4h, 50)
+    e50_prev = ema(closes_4h[:-5], 50)
 
-        # Fibonacci scoring (±1)
+    if e20 and e50 and e50_prev and len(klines) >= 2:
+        prev_close = klines[-2]["close"]
+        downtrend = e20 < e50 and e50 < e50_prev
+        uptrend = e20 > e50 and e50 > e50_prev
+
+        candidate = None
+        if downtrend:
+            if prev_close < e20 and price >= e20 * 0.998:
+                candidate = "SHORT"
+                v4_reasons.append(f"下跌趨勢中反彈至 4h EMA20 ${e20:,.0f}（順勢空點）")
+            else:
+                v4_reasons.append(f"下跌趨勢（EMA20 < EMA50 向下），等待反彈至 EMA20 ${e20:,.0f}")
+        elif uptrend:
+            if prev_close > e20 and price <= e20 * 1.002:
+                candidate = "LONG"
+                v4_reasons.append(f"上升趨勢中回撤至 4h EMA20 ${e20:,.0f}（順勢多點）")
+            else:
+                v4_reasons.append(f"上升趨勢（EMA20 > EMA50 向上），等待回撤至 EMA20 ${e20:,.0f}")
+        else:
+            v4_reasons.append("無明確趨勢（EMA 糾纏），觀望")
+
+        # Cooldown: 觸發後 24h 內不重複出信號
+        if candidate:
+            state = _load_v6_state()
+            last_ts = state.get(symbol)
+            in_cooldown = False
+            if last_ts:
+                try:
+                    last_dt = datetime.fromisoformat(last_ts)
+                    if (ts - last_dt).total_seconds() < V6_COOLDOWN_H * 3600:
+                        in_cooldown = True
+                except Exception:
+                    pass
+            if in_cooldown:
+                v4_reasons.append(f"⏸ 冷卻中（上次信號 < {V6_COOLDOWN_H}h），本次不重複出信號")
+            else:
+                v4_decision = candidate
+                state[symbol] = ts.isoformat()
+                _save_v6_state(state)
+
+        # 斐波那契位置參考（日線 90 天）
         swing_h, swing_l = find_swing(daily, 90)
         fib_rng = swing_h - swing_l
-        fib_score = 0
-        fib_ratio = None
         if fib_rng > 0:
             fib_ratio = (price - swing_l) / fib_rng
-            if fib_ratio < 0.236:
-                fib_score = 1
-                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（極低位，支撐附近）")
-            elif fib_ratio < 0.382:
-                fib_score = 0.5
-                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（低位）")
-            elif fib_ratio > 0.786:
-                fib_score = -1
-                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（極高位，壓力附近）")
-            elif fib_ratio > 0.618:
-                fib_score = -0.5
-                v4_reasons.append(f"斐波那契 {fib_ratio:.0%}（高位）")
-
-        # OBV scoring (±1)
-        obv_vals = calc_obv(klines)
-        obv_score = 0
-        if len(obv_vals) > 10:
-            price_chg = klines[-1]["close"] - klines[-10]["close"]
-            obv_chg = obv_vals[-1] - obv_vals[-10]
-            if price_chg < 0 and obv_chg > 0:
-                obv_score = 1
-                v4_reasons.append("OBV 多頭背離（價跌量增）")
-            elif price_chg > 0 and obv_chg < 0:
-                obv_score = -1
-                v4_reasons.append("OBV 空頭背離（價漲量縮）")
-
-        # Combined: max ±6, threshold ±3
-        total_v5 = ichi_score + fib_score + obv_score
-        if total_v5 >= 3:
-            v4_decision = "LONG"
-        elif total_v5 <= -3:
-            v4_decision = "SHORT"
-
-        # Fibonacci contradiction warning
-        if fib_ratio is not None:
             if v4_decision == "LONG" and fib_ratio > 0.786:
                 v4_reasons.append(f"⚠️ 注意：斐波那契 {fib_ratio:.0%} 接近高位，回落風險")
             elif v4_decision == "SHORT" and fib_ratio < 0.236:
